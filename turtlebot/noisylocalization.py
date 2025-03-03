@@ -24,6 +24,8 @@ from rclpy.time                 import Time
 
 from tf2_ros                    import TransformBroadcaster
 from tf2_ros                    import TransformException
+from tf2_ros.buffer             import Buffer
+from tf2_ros.transform_listener import TransformListener
 from rclpy.qos                  import QoSProfile, DurabilityPolicy
 
 from geometry_msgs.msg          import Point, Quaternion, Pose
@@ -39,6 +41,8 @@ from sensor_msgs.msg            import LaserScan
 R = 0.3                 # Radius to convert angle to distance.
 
 NOISE = 0.12            # Noise fraction
+
+OBSTACLE_THRES = 90
 
 
 #
@@ -69,6 +73,7 @@ class CustomNode(Node):
 
         # Set the initial map to empty
         self.map = OccupancyGrid()
+        self.scan = LaserScan()
 
         # Initialize the transform broadcaster
         self.tfBroadcaster = TransformBroadcaster(self)
@@ -77,8 +82,12 @@ class CustomNode(Node):
                              depth=1)
         # Create a subscriber to the odometry topic.
         self.create_subscription(Odometry, '/odom', self.odomCB, 1)
-        self.create_subscription(LaserScan, '/scan', self.correctionCB, 1)
+        self.create_subscription(LaserScan, '/scan', self.updateScan, 1)
         self.create_subscription(OccupancyGrid, '/map', self.updateMap, quality)
+
+        # Instantiate a TF listener.
+        self.tfBuffer   = Buffer()
+        self.tfListener = TransformListener(self.tfBuffer, self)
 
     # Shutdown
     def shutdown(self):
@@ -88,10 +97,13 @@ class CustomNode(Node):
     def updateMap(self, msg):
         self.map = msg
 
-    def correctionCB(self, msg):
+    def updateScan(self, msg):
+        self.scan = msg
+
+    def correct_odometry(self):
         try:
             tfmsg = self.tfBuffer.lookup_transform(
-                'map', msg.header.frame_id, rclpy.time.Time())
+                'map', self.scan.header.frame_id, rclpy.time.Time())
         except TransformException as ex:
             self.get_logger().warn("Unable to get transform: %s" % (ex,))
             return
@@ -104,34 +116,91 @@ class CustomNode(Node):
 
         # Grab the rays: each ray's range and angle relative to the
         # turtlebot's position and orientation.
-        rmin     = msg.range_min        # Sensor minimum range to be valid
-        rmax     = msg.range_max        # Sensor maximum range to be valid
-        ranges   = msg.ranges           # List of ranges for each angle
+        rmin     = self.scan.range_min        # Sensor minimum range to be valid
+        rmax     = self.scan.range_max        # Sensor maximum range to be valid
+        ranges   = self.scan.ranges           # List of ranges for each angle
 
-        thetamin = msg.angle_min        # Min angle (0.0)
-        thetamax = msg.angle_max        # Max angle (2pi)
-        thetainc = msg.angle_increment  # Delta between angles (2pi/360)
+        thetamin = self.scan.angle_min        # Min angle (0.0)
+        thetamax = self.scan.angle_max        # Max angle (2pi)
+        thetainc = self.scan.angle_increment  # Delta between angles (2pi/360)
         thetas   = np.arange(thetamin, thetamax, thetainc)
 
         ORIGIN_X = self.map.info.origin.position.x
         ORIGIN_Y = self.map.info.origin.position.y
         RESOLUTION = self.map.info.resolution
+        HEIGHT = self.map.info.height
+        WIDTH = self.map.info.width
+        if RESOLUTION == 0:
+            return
 
-        points = []
+        scan_points = []
         u, v = (xc - ORIGIN_X) / RESOLUTION, (yc - ORIGIN_Y) / RESOLUTION
 
-        for theta, range in zip(thetas, ranges):
+        for theta, _range in zip(thetas, ranges):
             direction = theta + thetac
-            if rmin < range < rmax:
-                dist = range / RESOLUTION
+            if rmin < _range < rmax:
+                dist = _range / RESOLUTION
                 u_f, v_f = u + dist*np.cos(direction), v + dist*np.sin(direction)
-                points.append((u_f, v_f))
+                scan_points.append((u_f, v_f))
 
-        kdtree  = KDTree(points)
+        map_points = []
+        map_data = np.array(self.map.data).reshape((WIDTH, HEIGHT))
+        for x in range(WIDTH):
+            for y in range(HEIGHT):
+                if map_data[x, y] > OBSTACLE_THRES:
+                    map_points.append((x, y))
+    
 
-        print(self.map.data)
-        print("niga")
-        # numnear = kdtree.query_ball_point(points, r=1.5*DSTEP, return_length=True)
+        try:
+            kdtree  = KDTree(map_points)
+            radius = 1
+            near_map_indices = set(np.hstack(kdtree.query_ball_point(scan_points, r=radius)))
+            # near_map_indices = [kdtree.query(scan_point, k=1)[1] for scan_point in scan_points]
+            near_map_points = [map_points[int(index)] for index in near_map_indices]
+            N = min(len(near_map_points), len(scan_points))
+            near_map_points = near_map_points[:N]
+            scan_points = scan_points[:N]
+
+            P = np.array(near_map_points)
+            Q = np.array(scan_points)
+
+            # Compute centroids
+            p_centroid = np.mean(P, axis=0)
+            q_centroid = np.mean(Q, axis=0)
+
+            # Compute offset arrays
+            P_offset = P - p_centroid
+            Q_offset = Q - q_centroid
+
+            # Compute Covariance Matrix
+            H = P_offset.T @ Q_offset
+
+            # Calculate SVD
+            U, _, Vh = np.linalg.svd(H)
+            d = np.linalg.det(U @ Vh)
+            m = np.eye(2)
+            m[1, 1] = d
+            R = U @ m @ Vh
+            t = p_centroid - R @ q_centroid
+            print(p_centroid - q_centroid)
+            print("^^^^^")
+        except Exception as e:
+            print(e)
+            return
+
+        if N > 50:
+            pos_prev = np.array([self.x, self.y])
+            pos_new = (R @ pos_prev.T).T + t
+            self.x, self.y = pos_new
+            print("HERE")
+            rot_vec = np.array([cos(self.theta), sin(self.theta)])
+            new_rot_vec = R @ rot_vec
+            self.theta = np.arctan2(new_rot_vec[1], new_rot_vec[0])
+            # print(pos_prev)
+            # print(pos_new)
+            # new_theta = R.T @ self.theta
+
+
 
 
 
@@ -178,6 +247,9 @@ class CustomNode(Node):
         self.x     += cos(self.theta) * dx - sin(self.theta) * dy
         self.y     += sin(self.theta) * dx + cos(self.theta) * dy
         self.theta += dt
+
+        # Update odometry based on map vs lidar
+        self.correct_odometry()
 
         # Broadcast the new drift.
         tfmsg = TransformStamped()
