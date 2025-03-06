@@ -33,6 +33,9 @@ from geometry_msgs.msg          import Transform, TransformStamped
 from nav_msgs.msg               import Odometry
 from nav_msgs.msg               import OccupancyGrid
 from sensor_msgs.msg            import LaserScan
+from visualization_msgs.msg     import Marker
+from visualization_msgs.msg     import MarkerArray
+from geometry_msgs.msg import Point
 
 
 #
@@ -42,7 +45,7 @@ R = 0.3                 # Radius to convert angle to distance.
 
 NOISE = 0.12            # Noise fraction
 
-OBSTACLE_THRES = 90
+OBSTACLE_THRES = 93
 
 
 #
@@ -81,6 +84,12 @@ class CustomNode(Node):
         quality = QoSProfile(durability=DurabilityPolicy.TRANSIENT_LOCAL,
                              depth=1)
         # Create a subscriber to the odometry topic.
+
+        self.marker_pub = self.create_publisher(MarkerArray,
+                                        '/visualization_marker_array', 1)
+
+
+
         self.create_subscription(Odometry, '/odom', self.odomCB, 1)
         self.create_subscription(LaserScan, '/scan', self.updateScan, 1)
         self.create_subscription(OccupancyGrid, '/map', self.updateMap, quality)
@@ -100,7 +109,7 @@ class CustomNode(Node):
     def updateScan(self, msg):
         self.scan = msg
 
-    def correct_odometry(self):
+    def correct_odometry(self, x1, y1, t1):
         try:
             tfmsg = self.tfBuffer.lookup_transform(
                 'map', self.scan.header.frame_id, rclpy.time.Time())
@@ -143,23 +152,28 @@ class CustomNode(Node):
                 u_f, v_f = u + dist*np.cos(direction), v + dist*np.sin(direction)
                 scan_points.append((u_f, v_f))
 
+        map_data = np.array(self.map.data).reshape((HEIGHT, WIDTH))
         map_points = []
-        map_data = np.array(self.map.data).reshape((WIDTH, HEIGHT))
-        for x in range(WIDTH):
-            for y in range(HEIGHT):
-                if map_data[x, y] > OBSTACLE_THRES:
+        for y in range(HEIGHT):
+            for x in range(WIDTH):
+                if map_data[y, x] > OBSTACLE_THRES:
                     map_points.append((x, y))
-    
+
 
         try:
             kdtree  = KDTree(map_points)
             radius = 1
-            near_map_indices = set(np.hstack(kdtree.query_ball_point(scan_points, r=radius)))
-            # near_map_indices = [kdtree.query(scan_point, k=1)[1] for scan_point in scan_points]
+            # near_map_indices = set(np.hstack(kdtree.query_ball_point(scan_points, r=radius)))
+            near_map_indices = [kdtree.query(scan_point, k=1)[1] for scan_point in scan_points]
             near_map_points = [map_points[int(index)] for index in near_map_indices]
             N = min(len(near_map_points), len(scan_points))
-            near_map_points = near_map_points[:N]
-            scan_points = scan_points[:N]
+            # near_map_points = near_map_points[:N]
+            # scan_points = scan_points[:N]
+            scan_points = self.unscale_coordinates(scan_points)
+            near_map_points = self.unscale_coordinates(near_map_points)
+
+            # TESTING WITH MARKERS
+            self.publish_line_marker(zip(near_map_points, scan_points))
 
             P = np.array(near_map_points)
             Q = np.array(scan_points)
@@ -189,18 +203,14 @@ class CustomNode(Node):
             return
 
         if N > 50:
-            pos_prev = np.array([self.x, self.y])
-            pos_new = (R @ pos_prev.T).T + t
-            self.x, self.y = pos_new
+            pos_prev = x1, y1
+            pos_new = R @ pos_prev + t
+            # self.x, self.y = pos_prev*0.5 + 0.5*pos_new
             print("HERE")
             rot_vec = np.array([cos(self.theta), sin(self.theta)])
-            new_rot_vec = R @ rot_vec
-            self.theta = np.arctan2(new_rot_vec[1], new_rot_vec[0])
-            # print(pos_prev)
-            # print(pos_new)
+            delta = np.arctan2(R[1, 0], R[0, 0])
+            self.theta = t1 + delta
             # new_theta = R.T @ self.theta
-
-
 
 
 
@@ -224,8 +234,7 @@ class CustomNode(Node):
                        self.odom.orientation.w)
 
         # Save the new reading.
-        self.odom = msg.pose.pose
-
+        self.odom = self.correct_odometry(x1, y1, t1)
         # Compute the magnitude of the difference.
         d = sqrt((x1-x0)**2 + (y1-y0)**2 + (R*wrapto180(t1-t0))**2)
 
@@ -248,8 +257,6 @@ class CustomNode(Node):
         self.y     += sin(self.theta) * dx + cos(self.theta) * dy
         self.theta += dt
 
-        # Update odometry based on map vs lidar
-        self.correct_odometry()
 
         # Broadcast the new drift.
         tfmsg = TransformStamped()
@@ -266,6 +273,54 @@ class CustomNode(Node):
 
         #print('Sent transform (%6.3f, %6.3f, %6.3f)' %
         #      (self.x, self.y, self.theta))
+
+
+    def unscale_coordinates(self, coords):
+        RESOLUTION = self.map.info.resolution
+        origin_x = self.map.info.origin.position.x
+        origin_y = self.map.info.origin.position.y
+        coords = np.array(coords)
+        unscaled_coords = coords * RESOLUTION
+        unscaled_coords[:,0] += origin_x
+        unscaled_coords[:,1] += origin_y
+        return list(unscaled_coords)
+
+
+    def publish_line_marker(self, points):
+        marker_list = []
+        for i, pair in enumerate(points):
+            marker = Marker()
+            marker.header.frame_id = "map"  # Change "map" to "odom" if "map" doesn't exist
+            marker.type = Marker.LINE_STRIP
+            marker.action = Marker.ADD
+            # marker.header.stamp = self.get_clock().now().to_msg()
+            # marker.lifetime = rclpy.duration.Duration(seconds=0).to_msg()
+            marker.id = i
+            marker.ns = "line_markers"
+
+            RESOLUTION = self.map.info.resolution
+            origin_x = self.map.info.origin.position.x
+            origin_y = self.map.info.origin.position.y
+            p1 = Point()
+            p1.x, p1.y = float(pair[0][0]), float(pair[0][1])
+
+            p2 = Point()
+            p2.x, p2.y = float(pair[1][0]), float(pair[1][1])
+
+            marker.points.append(p1)
+            marker.points.append(p2)
+
+            marker.scale.x = 0.05 # Line width
+            marker.color.r = 0.0
+            marker.color.g = 0.7
+            marker.color.b = 0.5
+            marker.color.a = 1.0
+
+            marker_list.append(marker)
+
+        marker_array = MarkerArray(markers=marker_list)
+        self.marker_pub.publish(marker_array)
+
 
 
 #
