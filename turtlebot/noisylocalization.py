@@ -26,6 +26,7 @@ from tf2_ros                    import TransformBroadcaster
 from tf2_ros                    import TransformException
 from tf2_ros.buffer             import Buffer
 from tf2_ros.transform_listener import TransformListener
+from transforms3d.euler import euler2quat
 from rclpy.qos                  import QoSProfile, DurabilityPolicy
 
 from geometry_msgs.msg          import Point, Quaternion, Pose
@@ -45,7 +46,7 @@ R = 0.3                 # Radius to convert angle to distance.
 
 NOISE = 0.12            # Noise fraction
 
-OBSTACLE_THRES = 93
+OBSTACLE_THRES = 97
 
 
 #
@@ -109,7 +110,7 @@ class CustomNode(Node):
     def updateScan(self, msg):
         self.scan = msg
 
-    def correct_odometry(self, x1, y1, t1):
+    def correct_odometry(self, x_prev, y_prev, theta_prev):
         try:
             tfmsg = self.tfBuffer.lookup_transform(
                 'map', self.scan.header.frame_id, rclpy.time.Time())
@@ -162,8 +163,6 @@ class CustomNode(Node):
 
         try:
             kdtree  = KDTree(map_points)
-            radius = 1
-            # near_map_indices = set(np.hstack(kdtree.query_ball_point(scan_points, r=radius)))
             near_map_indices = [kdtree.query(scan_point, k=1)[1] for scan_point in scan_points]
             near_map_points = [map_points[int(index)] for index in near_map_indices]
             N = min(len(near_map_points), len(scan_points))
@@ -196,21 +195,24 @@ class CustomNode(Node):
             m[1, 1] = d
             R = U @ m @ Vh
             t = p_centroid - R @ q_centroid
-            print(p_centroid - q_centroid)
-            print("^^^^^")
         except Exception as e:
             print(e)
             return
 
-        if N > 50:
-            pos_prev = x1, y1
-            pos_new = R @ pos_prev + t
-            # self.x, self.y = pos_prev*0.5 + 0.5*pos_new
-            print("HERE")
-            rot_vec = np.array([cos(self.theta), sin(self.theta)])
+        if N > 100:
+            print("updated")
+            pos_prev = np.array([x_prev, y_prev])
+            pos_new = np.array(R @ pos_prev + t)
+            pos_updated = 0.2*pos_prev + 0.8*pos_new
             delta = np.arctan2(R[1, 0], R[0, 0])
-            self.theta = t1 + delta
-            # new_theta = R.T @ self.theta
+            theta_updated = theta_prev - delta
+            # print(theta_updated)
+            q = euler2quat(0, 0, theta_updated)
+            updated_pose = Pose()
+            updated_pose.position.x = pos_updated[0]
+            updated_pose.position.y = pos_updated[1]
+            updated_pose.orientation = Quaternion(x=q[1], y=q[2], z=q[3], w=q[0])
+            return updated_pose
 
 
 
@@ -234,7 +236,12 @@ class CustomNode(Node):
                        self.odom.orientation.w)
 
         # Save the new reading.
-        self.odom = self.correct_odometry(x1, y1, t1)
+        now  = self.get_clock().now().seconds_nanoseconds()[0]
+        if not now % 2:
+            self.odom = self.correct_odometry(x1, y1, t1)
+            print(f"New odometry: {self.odom}")
+        else:
+            self.odom = msg.pose.pose
         # Compute the magnitude of the difference.
         d = sqrt((x1-x0)**2 + (y1-y0)**2 + (R*wrapto180(t1-t0))**2)
 
@@ -294,13 +301,10 @@ class CustomNode(Node):
             marker.type = Marker.LINE_STRIP
             marker.action = Marker.ADD
             # marker.header.stamp = self.get_clock().now().to_msg()
-            # marker.lifetime = rclpy.duration.Duration(seconds=0).to_msg()
+            marker.lifetime = rclpy.duration.Duration(seconds=2).to_msg()
             marker.id = i
             marker.ns = "line_markers"
 
-            RESOLUTION = self.map.info.resolution
-            origin_x = self.map.info.origin.position.x
-            origin_y = self.map.info.origin.position.y
             p1 = Point()
             p1.x, p1.y = float(pair[0][0]), float(pair[0][1])
 
