@@ -11,6 +11,7 @@
 #   Subscribe:  /scan                   sensor_msgs/Lsaerscan
 #   Publish:    /map                    nav_msgs/OccupancyGrid
 #
+import time
 import numpy as np
 
 # ROS Imports
@@ -23,6 +24,7 @@ from rclpy.qos                  import QoSProfile, DurabilityPolicy
 from tf2_ros                    import TransformException
 from tf2_ros.buffer             import Buffer
 from tf2_ros.transform_listener import TransformListener
+from tf2_ros.transform_broadcaster import TransformBroadcaster
 
 from geometry_msgs.msg          import Point, Quaternion, Pose
 from geometry_msgs.msg          import Transform, TransformStamped
@@ -67,6 +69,7 @@ class CustomNode(Node):
         # Instantiate a TF listener.
         self.tfBuffer   = Buffer()
         self.tfListener = TransformListener(self.tfBuffer, self)
+        self.tfBroadcaster = TransformBroadcaster(self)
 
         # Create a subscriber to the laser scan.
         self.create_subscription(LaserScan, '/scan', self.laserCB, 1)
@@ -154,6 +157,7 @@ class CustomNode(Node):
         # could determine the transform at the exact time of the scan.
         # But that delay a little if the latest TF data is behind.
         try:
+            time.sleep(0.1)
             tfmsg = self.tfBuffer.lookup_transform(
                 'map', msg.header.frame_id, rclpy.time.Time())
         except TransformException as ex:

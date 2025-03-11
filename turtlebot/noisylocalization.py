@@ -46,7 +46,7 @@ R = 0.3                 # Radius to convert angle to distance.
 
 NOISE = 0.12            # Noise fraction
 
-OBSTACLE_THRES = 97
+OBSTACLE_THRES = 85
 
 
 #
@@ -84,14 +84,14 @@ class CustomNode(Node):
 
         quality = QoSProfile(durability=DurabilityPolicy.TRANSIENT_LOCAL,
                              depth=1)
-        # Create a subscriber to the odometry topic.
 
         self.marker_pub = self.create_publisher(MarkerArray,
                                         '/visualization_marker_array', 1)
+        self.odom_pub = self.create_publisher(Pose, "/odom", 1)
 
 
 
-        self.create_subscription(Odometry, '/odom', self.odomCB, 1)
+        # Create subscribers
         self.create_subscription(LaserScan, '/scan', self.updateScan, 1)
         self.create_subscription(OccupancyGrid, '/map', self.updateMap, quality)
 
@@ -237,11 +237,11 @@ class CustomNode(Node):
 
         # Save the new reading.
         now  = self.get_clock().now().seconds_nanoseconds()[0]
-        if not now % 2:
-            self.odom = self.correct_odometry(x1, y1, t1)
-            print(f"New odometry: {self.odom}")
-        else:
-            self.odom = msg.pose.pose
+        # if not now % 2:
+        #     self.odom = self.correct_odometry(x1, y1, t1)
+        #     print(f"New odometry: {self.odom}")
+        # else:
+        self.odom = msg.pose.pose
         # Compute the magnitude of the difference.
         d = sqrt((x1-x0)**2 + (y1-y0)**2 + (R*wrapto180(t1-t0))**2)
 
@@ -277,6 +277,8 @@ class CustomNode(Node):
         tfmsg.transform.rotation.w    = cos(self.theta/2)
 
         self.tfBroadcaster.sendTransform(tfmsg)
+
+        # self.odom_pub.publish(self.odom)
 
         #print('Sent transform (%6.3f, %6.3f, %6.3f)' %
         #      (self.x, self.y, self.theta))

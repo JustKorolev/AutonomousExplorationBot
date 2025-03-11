@@ -33,6 +33,7 @@ setup(
             'buildmap          = turtlebot.buildmap:main',
             'slowbuildmap      = turtlebot.slowbuildmap:main',
             'teleop            = turtlebot.teleop:main',
+            'auton            = turtlebot.auton:main',
             'noisylocalization = turtlebot.noisylocalization:main',
         ],
     },
