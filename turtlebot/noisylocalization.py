@@ -87,11 +87,9 @@ class CustomNode(Node):
 
         self.marker_pub = self.create_publisher(MarkerArray,
                                         '/visualization_marker_array', 1)
-        self.odom_pub = self.create_publisher(Pose, "/odom", 1)
-
-
 
         # Create subscribers
+        self.create_subscription(Odometry, '/odom', self.odomCB, 1)
         self.create_subscription(LaserScan, '/scan', self.updateScan, 1)
         self.create_subscription(OccupancyGrid, '/map', self.updateMap, quality)
 
@@ -212,7 +210,9 @@ class CustomNode(Node):
             updated_pose.position.x = pos_updated[0]
             updated_pose.position.y = pos_updated[1]
             updated_pose.orientation = Quaternion(x=q[1], y=q[2], z=q[3], w=q[0])
-            return updated_pose
+            updated_odom = Odometry()
+            updated_odom.pose.pose = updated_pose
+            return updated_odom
 
 
 
@@ -277,8 +277,6 @@ class CustomNode(Node):
         tfmsg.transform.rotation.w    = cos(self.theta/2)
 
         self.tfBroadcaster.sendTransform(tfmsg)
-
-        # self.odom_pub.publish(self.odom)
 
         #print('Sent transform (%6.3f, %6.3f, %6.3f)' %
         #      (self.x, self.y, self.theta))
