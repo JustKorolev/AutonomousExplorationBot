@@ -22,25 +22,25 @@ from rclpy.time                 import Time
 
 from rclpy.qos                  import QoSProfile, DurabilityPolicy
 from geometry_msgs.msg          import Twist
-from geometry_msgs.msg          import Pose
+from nav_msgs.msg               import Odometry
 from nav_msgs.msg               import OccupancyGrid
 
 #
 #   Global Definitions
 #
-VNOM = 0.25
-WNOM = 0.5             # This gives a turning radius of v/w = 0.5m
+VNOM = 0.3
+WNOM = 0.5         # This gives a turning radius of v/w = 0.5m
 
 # DIMENSTION IN MAP RESOLUTION
 RESOLUTION = 0.05
-BOT_WIDTH = 0.24
-BOT_LENGTH = 0.40
+BOT_WIDTH = 7 # BOT DIMENSIONS ARE BIGGER THAN ACTUAL FOR TOLERANCE
+BOT_LENGTH = 7
 MAP_WIDTH  = 360
 MAP_HEIGHT = 240
 ORIGIN_X   = -9.00              # Origin = location of lower-left corner
 ORIGIN_Y   = -6.00
 
-OBSTACLE_THRES = 0
+OBSTACLE_THRES = 80
 
 def wrapto180(angle):
     return angle - 2*np.pi * round(angle/(2*np.pi))
@@ -64,8 +64,9 @@ class CustomNode(Node):
         # Subscribers
         quality = QoSProfile(durability=DurabilityPolicy.TRANSIENT_LOCAL,
                              depth=1)
-        self.create_subscription(Pose, '/odom', self.updateOdom, 1)
-        self.create_subscription(OccupancyGrid, '/map', self.updateMap, quality)
+        self.create_subscription(Odometry, '/odom', self.updateOdom, 1)
+        self.create_subscription(OccupancyGrid, '/map', self.updateMap, 1)
+
 
         # Initialize the (repeating) message data.
         self.msg = Twist()
@@ -78,7 +79,7 @@ class CustomNode(Node):
 
         # Initialize map and odometry
         self.map = OccupancyGrid()
-        self.odom = Pose()
+        self.odom = Odometry()
 
         # Create a fixed rate to control the speed of sending commands.
         rate    = 10.0
@@ -96,26 +97,28 @@ class CustomNode(Node):
     def updateOdom(self, msg):
         self.odom = msg
 
-    def is_colliding(self, pos, step, screen):
+    def is_colliding(self, pos, heading, forward_vel_multiplier,
+                     angular_vel_multiplier, screen):
         pos_x, pos_y = pos.x, pos.y
-        scaled_step = step / RESOLUTION
-        new_pos_x, new_pos_y = (pos_x - ORIGIN_X) + scaled_step / RESOLUTION, (pos_y - ORIGIN_Y) / RESOLUTION + scaled_step
+        pos_x_scaled, pos_y_scaled = (pos_x - ORIGIN_X) / RESOLUTION, (pos_y - ORIGIN_Y) / RESOLUTION
+        dstep = 4 * np.sign(forward_vel_multiplier)
+        dtheta = 0.1 * np.sign(angular_vel_multiplier)
+        next_pos_x = pos_x_scaled + dstep * np.cos(heading + dtheta/2) * np.sinc(dtheta/2/np.pi)
+        next_pos_y = pos_y_scaled + dstep * np.sin(heading + dtheta/2) * np.sinc(dtheta/2/np.pi)
         screen.addstr(12, 0,
-                        f"Scaled pos: {pos_x, pos_y}")
-        print("ebar")
-        screen.refresh()
-        min_x = max(int(new_pos_x - BOT_WIDTH / 2), 0)
-        max_x = min(int(new_pos_x + BOT_WIDTH / 2), MAP_WIDTH - 1)
-        min_y = max(int(new_pos_y - BOT_LENGTH / 2), 0)
-        max_y = min(int(new_pos_y + BOT_LENGTH / 2), MAP_HEIGHT - 1)
+                        f"Scaled pos: {next_pos_x, next_pos_y}")
+        min_x = max(int(next_pos_x - BOT_WIDTH / 2), 0)
+        max_x = min(int(next_pos_x + BOT_WIDTH / 2), MAP_WIDTH - 1)
+        min_y = max(int(next_pos_y - BOT_LENGTH / 2), 0)
+        max_y = min(int(next_pos_y + BOT_LENGTH / 2), MAP_HEIGHT - 1)
 
         try:
-            map_array = np.array(self.map.data).reshape((MAP_HEIGHT, MAP_WIDTH))
+            map_array = np.array(self.map.data, dtype=np.int8).reshape((MAP_HEIGHT, MAP_WIDTH))
         except ValueError:
             return False
 
-        print(map_array[min_x:max_x+1][min_y:max_y+1])
-        if map_array.shape == (MAP_WIDTH, MAP_HEIGHT) and np.any(map_array[min_x:max_x+1][min_y:max_y+1] > OBSTACLE_THRES):
+        # screen.addstr(16, 0, f"Map stuff: {np.where(map_array > OBSTACLE_THRES)[0]}")
+        if np.any(map_array[min_y:max_y+1, min_x:max_x+1] > OBSTACLE_THRES):
             return True  # Collision detected
         return False  # No collision
 
@@ -134,26 +137,34 @@ class CustomNode(Node):
         vel = (0.0, 0.0)
 
         # Run the loop until shutdown.
+        forward_vel_multiplier = 1
+        std = np.pi/2
         while rclpy.ok():
             # Reduce the active time and stop if necessary.
-            step = VNOM * self.dt
-            std = np.pi/2
             vel = (0.0, 0.0)
 
             # Autonomous decision
             while True: # until finds valid decision
-                pos = self.odom.position
-                print(pos)
-                screen.refresh()
-                heading_curr = self.odom.orientation.z
-                heading_new = random.gauss(heading_curr, std)
-                if not self.is_colliding(pos, step, screen):
-                    vel = (VNOM, 0.0) # FIXME
+                pos = self.odom.pose.pose.position
+                heading = self.odom.pose.pose.orientation.z
+                angular_vel_multiplier = random.gauss(0, std)
+                angular_vel = angular_vel_multiplier * WNOM
+                forward_vel = forward_vel_multiplier * VNOM
+                if not self.is_colliding(pos, heading, forward_vel_multiplier,
+                                         angular_vel_multiplier, screen):
+                    vel = (forward_vel, angular_vel)
                     std = np.pi/2
+                    if forward_vel_multiplier < 1:
+                        forward_vel_multiplier += 0.005
                     break
                 else:
-                    std += np.pi/8
+                    print(forward_vel_multiplier)
+                    if std < 10*np.pi:
+                        std += 0.1
+                    if forward_vel_multiplier > -1:
+                        forward_vel_multiplier -= 0.1
                     vel = (0.0, 0.0)
+                rclpy.spin_once(self)
 
 
             # Update the message and publish.
@@ -161,17 +172,16 @@ class CustomNode(Node):
             self.msg.angular.z = vel[1]
             self.pub.publish(self.msg)
 
-            # screen.clrtoeol()
-            # screen.addstr(10, 0, f"{self.is_colliding(pos, step, screen)}")
-            # screen.addstr(11, 0,
-            #             "Sending fwd = %6.3fm/s, spin = %6.3frad/sec" % vel)
-            # screen.refresh()
+            screen.clrtoeol()
+            screen.addstr(11, 0,
+                        "Sending fwd = %6.3fm/s, spin = %6.3frad/sec" % vel)
+            screen.refresh()
 
             # Spin once to process other items.
             rclpy.spin_once(self)
 
             # Wait for the next turn.
-            self.rate.sleep()
+            # self.rate.sleep()
 
 
 

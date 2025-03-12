@@ -56,7 +56,7 @@ class CustomNode(Node):
         super().__init__(name)
 
         # Create the log-odds-ratio grid.
-        self.logoddsratio = np.ones((HEIGHT, WIDTH))
+        self.logoddsratio = np.zeros((HEIGHT, WIDTH))
 
         # Create a publisher to send the map data.  Note we use a
         # quality of service with durability TRANSIENT_LOCAL, so new
@@ -207,7 +207,7 @@ class CustomNode(Node):
                 intermediates = self.bresenham((u, v), (u_f, v_f))
                 for u_interm, v_interm in intermediates:
                     self.adjust(u_interm, v_interm, -LFREE)
-        #############################################################
+        ############################################################
 
 
 #
