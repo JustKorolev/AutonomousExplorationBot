@@ -24,16 +24,16 @@ def generate_launch_description():
     # LOCATE FILES
 
     # # WORLD: Locate the Gazebo world.  Regular house or alternate world.
-    # worldfile = os.path.join(pkgdir('turtlebot3_gazebo'),
-    #                          'worlds', 'turtlebot3_house.world')
+    worldfile = os.path.join(pkgdir('turtlebot3_gazebo'),
+                             'worlds', 'turtlebot3_house.world')
     # # worldfile = os.path.join(pkgdir('turtlebot3_gazebo'),
     # #                          'worlds', 'turtlebot3_dqn_stage4.world')
 
     # # MODEL: Locate the Gazebo TurtleBot model: With clean or noisy lidar.
     # # The original is: turtlebot3_gazebo/models/turtlebot3_waffle/model.sdf
     # modelfile = os.path.join(pkgdir('turtlebot'), 'models', 'turtlebot.sdf')
-    # cleanlidarmodelfile = os.path.join(pkgdir('turtlebot'), 'models',
-    #                                    'turtlebot_cleanlidar.sdf')
+    cleanlidarmodelfile = os.path.join(pkgdir('turtlebot'), 'models',
+                                       'turtlebot_cleanlidar.sdf')
     # noisylidarmodelfile = os.path.join(pkgdir('turtlebot'), 'models',
     #                                    'turtlebot_noisylidar.sdf')
 
@@ -66,10 +66,10 @@ def generate_launch_description():
 
     ### SIMULATION.
     # # Gazebo Server.  Use the standard launch description.
-    # incl_gzserver = IncludeLaunchDescription(
-    #     PythonLaunchDescriptionSource(
-    #         os.path.join(pkgdir('gazebo_ros'), 'launch', 'gzserver.launch.py')),
-    #     launch_arguments={'world': worldfile}.items())
+    incl_gzserver = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(pkgdir('gazebo_ros'), 'launch', 'gzserver.launch.py')),
+        launch_arguments={'world': worldfile}.items())
 
     # # Gazebo Client (Window).  Optional.  Use the standard launch description.
     # incl_gzclient = IncludeLaunchDescription(
@@ -86,13 +86,13 @@ def generate_launch_description():
     #     arguments  = ['-entity', 'waffle', '-file', modelfile,
     #                   '-x', '-2.0', '-y', '1.0', '-z', '0.01'])
 
-    # node_spawn_turtlebot_cleanlidar = Node(
-    #     name       = 'spawn_turtlenbot',
-    #     package    = 'gazebo_ros',
-    #     executable = 'spawn_entity.py',
-    #     output     = 'screen',
-    #     arguments  = ['-entity', 'waffle', '-file', cleanlidarmodelfile,
-    #                   '-x', '-2.0', '-y', '1.0', '-z', '0.01'])
+    node_spawn_turtlebot_cleanlidar = Node(
+        name       = 'spawn_turtlenbot',
+        package    = 'gazebo_ros',
+        executable = 'spawn_entity.py',
+        output     = 'screen',
+        arguments  = ['-entity', 'waffle', '-file', cleanlidarmodelfile,
+                      '-x', '-2.0', '-y', '1.0', '-z', '0.01'])
 
     # node_spawn_turtlebot_noisylidar = Node(
     #     name       = 'spawn_turtlenbot',
@@ -191,10 +191,10 @@ def generate_launch_description():
         # have to start the server and ONE of the spawn nodes (with a
         # clean or noisy lidar).  If you do NOT use Gazebo, start the
         # playback using the BAG folder selected at the top.
-        #incl_gzserver,
-        #node_spawn_turtlebot_cleanlidar,
+        incl_gzserver,
+        node_spawn_turtlebot_cleanlidar,
         #node_spawn_turtlebot_noisylidar,
-        cmd_playback,
+        # cmd_playback,
 
         # VIEWER: Select a viewer.  RVIZ or Gazebo client.
         #incl_gzclient,
@@ -205,13 +205,13 @@ def generate_launch_description():
         # the robot), as well as ONE of the localizations (to locate
         # the robot in the map): perfect or noisy.
         node_robot_state_publisher,
-        node_perfectlocalization,
-        #node_noisylocalization,
+        # node_perfectlocalization,
+        node_noisylocalization,
 
         # MAP: Use either the first two lines (together, to show the
         # perfect map).  OR the last line to start your code...
-        node_map_server,
-        node_lifecycle,
-        #node_buildmap,
+        # node_map_server,
+        # node_lifecycle,
+        node_buildmap,
 
     ])

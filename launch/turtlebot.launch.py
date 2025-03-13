@@ -197,7 +197,7 @@ def generate_launch_description():
         #cmd_playback,
 
         # VIEWER: Select a viewer.  RVIZ or Gazebo client.
-        # incl_gzclient,
+        incl_gzclient,
         node_rviz,
 
         # FRAMES: For anything outside Gazebo, you will need the robot

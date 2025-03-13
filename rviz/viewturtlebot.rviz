@@ -6,6 +6,10 @@ Panels:
       Expanded:
         - /Global Options1
         - /Status1
+        - /MarkerArray1
+        - /MarkerArray1/Topic1
+        - /Marker1
+        - /Marker1/Namespaces1
       Splitter Ratio: 0.5382353067398071
     Tree Height: 555
   - Class: rviz_common/Selection
@@ -257,13 +261,26 @@ Visualization Manager:
       Enabled: true
       Name: MarkerArray
       Namespaces:
-        line_markers: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /visualization_marker_array
+      Value: true
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: Marker
+      Namespaces:
+        auton_markers: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /visualization_marker
       Value: true
   Enabled: true
   Global Options:
@@ -342,5 +359,5 @@ Window Geometry:
   Views:
     collapsed: false
   Width: 1337
-  X: 241
-  Y: 1202
+  X: 378
+  Y: 31

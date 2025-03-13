@@ -13,6 +13,7 @@ import curses
 import numpy as np
 import sys
 import random
+from scipy.spatial      import KDTree
 
 # ROS Imports
 import rclpy
@@ -24,6 +25,8 @@ from rclpy.qos                  import QoSProfile, DurabilityPolicy
 from geometry_msgs.msg          import Twist
 from nav_msgs.msg               import Odometry
 from nav_msgs.msg               import OccupancyGrid
+from visualization_msgs.msg     import Marker
+from geometry_msgs.msg import Point
 
 #
 #   Global Definitions
@@ -40,7 +43,9 @@ MAP_HEIGHT = 240
 ORIGIN_X   = -9.00              # Origin = location of lower-left corner
 ORIGIN_Y   = -6.00
 
-OBSTACLE_THRES = 80
+OBSTACLE_THRESH = 80
+CLEAR_THRESH = 30
+FRONTIER_DIST = 1
 
 def wrapto180(angle):
     return angle - 2*np.pi * round(angle/(2*np.pi))
@@ -61,6 +66,10 @@ class CustomNode(Node):
         # Create a publisher to send twist commands.
         self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
+        # Create a publisher to send marker arrays
+        self.marker_pub = self.create_publisher(Marker,
+                                        '/visualization_marker', 10)
+
         # Subscribers
         quality = QoSProfile(durability=DurabilityPolicy.TRANSIENT_LOCAL,
                              depth=1)
@@ -79,12 +88,14 @@ class CustomNode(Node):
 
         # Initialize map and odometry
         self.map = OccupancyGrid()
+        self.map_array = np.array([[], []])
         self.odom = Odometry()
 
         # Create a fixed rate to control the speed of sending commands.
         rate    = 10.0
         self.dt = 1/rate
         self.rate = self.create_rate(rate)
+        self.timer = self.create_timer(1.0, self.publish_markers)
 
         # Report.
         self.get_logger().info("Auton sending every %f sec..." % self.dt)
@@ -93,6 +104,11 @@ class CustomNode(Node):
 
     def updateMap(self, msg):
         self.map = msg
+        try:
+            self.map_array = np.array(msg.data, dtype=np.int8).reshape(
+                                                        (MAP_HEIGHT, MAP_WIDTH))
+        except ValueError:
+            self.map_array = np.array([[], []])
 
     def updateOdom(self, msg):
         self.odom = msg
@@ -112,16 +128,109 @@ class CustomNode(Node):
         min_y = max(int(next_pos_y - BOT_LENGTH / 2), 0)
         max_y = min(int(next_pos_y + BOT_LENGTH / 2), MAP_HEIGHT - 1)
 
-        try:
-            map_array = np.array(self.map.data, dtype=np.int8).reshape((MAP_HEIGHT, MAP_WIDTH))
-        except ValueError:
-            return False
-
         # screen.addstr(16, 0, f"Map stuff: {np.where(map_array > OBSTACLE_THRES)[0]}")
-        if np.any(map_array[min_y:max_y+1, min_x:max_x+1] > OBSTACLE_THRES):
+        if self.map_array.shape == (MAP_HEIGHT, MAP_WIDTH) and\
+            np.any(self.map_array[min_y:max_y+1, min_x:max_x+1] > OBSTACLE_THRESH):
             return True  # Collision detected
         return False  # No collision
 
+    def unscale_coordinates(self, coords):
+        RESOLUTION = self.map.info.resolution
+        origin_x = self.map.info.origin.position.x
+        origin_y = self.map.info.origin.position.y
+        coords = np.array(coords)
+        unscaled_coords = coords * RESOLUTION
+        unscaled_coords[:,1] += origin_x
+        unscaled_coords[:,0] += origin_y
+        return list(unscaled_coords)
+
+    def get_frontier_idxs(self):
+        # FIND FRONTIER CELLS
+        unexplored = ((self.map_array > CLEAR_THRESH) & (self.map_array < OBSTACLE_THRESH)).astype(int)
+        unexplored_indices = np.argwhere(unexplored == 1)
+        free = (self.map_array < CLEAR_THRESH).astype(int)
+        free_indices = np.argwhere(free == 1)
+        tree = KDTree(free_indices)
+
+        neighbor_count = np.zeros_like(unexplored, dtype=int) # num of clear neighbors
+        for idx in unexplored_indices:
+            neighbors = tree.query_ball_point(idx, FRONTIER_DIST)
+            neighbor_count[tuple(idx)] = len(neighbors)
+
+        frontier = ((neighbor_count > 0)).astype(int)
+        frontier_indices = np.argwhere(frontier == 1)
+
+        return frontier_indices
+
+    def get_goal(self, pos, frontier_idxs):
+        heuristics = {} # heuristic for each frontier cell
+        for idx in frontier_idxs:
+            # make sure this distance is correct
+            dist = np.sqrt((pos.x - idx[0])**2 + (pos.y - idx[1])**2)
+
+            # include number of neighboring frontier cells in cost
+            tree = KDTree(frontier_idxs)
+            neighbor_count = len(tree.query_ball_point(idx, FRONTIER_DIST)) # num of frontier neighbors
+
+            heuristics[tuple(idx)] = 10/neighbor_count + 0.1*dist
+
+        # pick goal with minimum cost
+        if len(heuristics) != 0:
+            goal_idx = min(heuristics, key=heuristics.get)
+        else:
+            goal_idx = (0, 0)
+        return goal_idx
+
+    def publish_markers(self):
+        # markers for frontier points
+        frontier_points = self.get_frontier_idxs()
+        frontier_points = self.unscale_coordinates(frontier_points)
+        marker = Marker()
+        marker.header.frame_id = "map"
+        marker.type = Marker.POINTS
+        marker.action = Marker.ADD
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.lifetime = rclpy.duration.Duration(seconds=4).to_msg()
+        marker.id = 0
+        marker.ns = "frontier_markers"
+
+        marker.scale.x = 0.1
+        marker.scale.y = 0.1
+        marker.color.r = 0.0
+        marker.color.g = 0.4
+        marker.color.b = 0.8
+        marker.color.a = 1.0
+
+        for p in frontier_points:
+            point = Point()
+            point.x, point.y = float(p[1]), float(p[0])
+            marker.points.append(point)
+
+        self.marker_pub.publish(marker)
+
+        # marker for goal
+        goal = self.get_goal(self.odom.pose.pose.position, frontier_points)
+        marker1 = Marker()
+        marker1.header.frame_id = "map"
+        marker1.type = Marker.POINTS
+        marker1.action = Marker.ADD
+        marker1.header.stamp = self.get_clock().now().to_msg()
+        marker1.lifetime = rclpy.duration.Duration(seconds=4).to_msg()
+        marker1.id = 1
+        marker1.ns = "goal_marker"
+
+        marker1.scale.x = 0.3
+        marker1.scale.y = 0.3
+        marker1.color.r = 0.0
+        marker1.color.g = 1.0
+        marker1.color.b = 0.0
+        marker1.color.a = 1.0
+
+        goal_point = Point()
+        goal_point.x, goal_point.y = float(goal[1]), float(goal[0])
+        marker1.points.append(goal_point)
+
+        self.marker_pub.publish(marker1)
 
     # Shutdown
     def shutdown(self):
@@ -170,7 +279,9 @@ class CustomNode(Node):
             # Update the message and publish.
             self.msg.linear.x  = vel[0]
             self.msg.angular.z = vel[1]
-            self.pub.publish(self.msg)
+            # self.pub.publish(self.msg)
+
+            # print(len(self.get_frontier_idxs()))
 
             screen.clrtoeol()
             screen.addstr(11, 0,

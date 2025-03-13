@@ -42,8 +42,8 @@ RESOLUTION = 0.05
 ORIGIN_X   = -9.00              # Origin = location of lower-left corner
 ORIGIN_Y   = -6.00
 
-LFREE     = 0.01      # FIXME.  Set the log odds ratio of detecting freespace
-LOCCUPIED = 0.1       # FIXME.  Set the log odds ratio of detecting occupancy
+LFREE     = 0.2      # FIXME.  Set the log odds ratio of detecting freespace
+LOCCUPIED = 0.2       # FIXME.  Set the log odds ratio of detecting occupancy
 
 
 #
