@@ -75,7 +75,7 @@ class CustomNode(Node):
         self.create_subscription(LaserScan, '/scan', self.laserCB, 1)
 
         # Create a timer for sending the map data.
-        self.timer = self.create_timer(1.0, self.sendMap)
+        self.timer = self.create_timer(1, self.sendMap)
 
     # Shutdown
     def shutdown(self):
