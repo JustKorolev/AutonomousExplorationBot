@@ -6,8 +6,8 @@ MAP_WIDTH  = 360
 MAP_HEIGHT = 240
 OBSTACLE_THRESH = 70
 CLEAR_THRESH = 30
-BOT_WIDTH_CLEARANCE = 20
-BOT_LENGTH_CLEARANCE = 20
+BOT_WIDTH_CLEARANCE = 10
+BOT_LENGTH_CLEARANCE = 10
 
 
 class Node:
@@ -35,13 +35,11 @@ class Node:
 
         # Move along ray (excluding endpoint).
         if (np.abs(xe-xs) >= np.abs(ye-ys)):
-            step = max(1, int(np.sign(xe-xs)))
             return[(u, int(ys + (ye-ys)/(xe-xs) * (u+0.5-xs)))
-                   for u in range(int(xs), int(xe), step)]
+                   for u in range(int(xs), int(xe), int(np.sign(xe-xs)))]
         else:
-            step = (np.sign(ye-ys))
             return[(int(xs + (xe-xs)/(ye-ys) * (v+0.5-ys)), v)
-                   for v in range(int(ys), int(ye), step)]
+                   for v in range(int(ys), int(ye), np.sign(ye-ys))]
 
     # Compute/create an intermediate node.  This can be useful if you
     # need to check the local planner by testing intermediate nodes.

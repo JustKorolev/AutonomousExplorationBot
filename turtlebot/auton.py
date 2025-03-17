@@ -15,6 +15,7 @@ import sys
 import random
 from scipy.spatial      import KDTree
 from .node import Node as MapNode
+from .robot_controller import RobotController
 import time
 
 # ROS Imports
@@ -80,13 +81,13 @@ class CustomNode(Node):
 
 
         # Initialize the (repeating) message data.
-        self.msg = Twist()
-        self.msg.linear.x = 0.0
-        self.msg.linear.y = 0.0
-        self.msg.linear.z = 0.0
-        self.msg.angular.x = 0.0
-        self.msg.angular.y = 0.0
-        self.msg.angular.z = 0.0
+        self.vel_msg = Twist()
+        self.vel_msg.linear.x = 0.0
+        self.vel_msg.linear.y = 0.0
+        self.vel_msg.linear.z = 0.0
+        self.vel_msg.angular.x = 0.0
+        self.vel_msg.angular.y = 0.0
+        self.vel_msg.angular.z = 0.0
 
         # Initialize map and odometry
         self.map = OccupancyGrid()
@@ -115,26 +116,19 @@ class CustomNode(Node):
     def updateOdom(self, msg):
         self.odom = msg
 
-    def is_colliding(self, pos, heading, forward_vel_multiplier,
-                     angular_vel_multiplier, screen):
-        pos_x, pos_y = pos.x, pos.y
-        pos_x_scaled, pos_y_scaled = (pos_x - ORIGIN_X) / RESOLUTION, (pos_y - ORIGIN_Y) / RESOLUTION
-        dstep = 4 * np.sign(forward_vel_multiplier)
-        dtheta = 0.1 * np.sign(angular_vel_multiplier)
-        next_pos_x = pos_x_scaled + dstep * np.cos(heading + dtheta/2) * np.sinc(dtheta/2/np.pi)
-        next_pos_y = pos_y_scaled + dstep * np.sin(heading + dtheta/2) * np.sinc(dtheta/2/np.pi)
-        screen.addstr(12, 0,
-                        f"Scaled pos: {next_pos_x, next_pos_y}")
-        min_x = max(int(next_pos_x - BOT_WIDTH / 2), 0)
-        max_x = min(int(next_pos_x + BOT_WIDTH / 2), MAP_WIDTH - 1)
-        min_y = max(int(next_pos_y - BOT_LENGTH / 2), 0)
-        max_y = min(int(next_pos_y + BOT_LENGTH / 2), MAP_HEIGHT - 1)
+    def get_pose(self):
+        pose = self.odom.pose.pose
+        return np.array([pose.position.x, pose.position.y]),\
+               pose.orientation.z
 
-        # screen.addstr(16, 0, f"Map stuff: {np.where(map_array > OBSTACLE_THRES)[0]}")
-        if self.map_array.shape == (MAP_HEIGHT, MAP_WIDTH) and\
-            np.any(self.map_array[min_y:max_y+1, min_x:max_x+1] > OBSTACLE_THRESH):
-            return True  # Collision detected
-        return False  # No collision
+    def publish_velocity(self, lin_vel, ang_vel):
+        self.vel_msg.linear.x  = lin_vel
+        self.vel_msg.angular.z = ang_vel
+        self.pub.publish(self.vel_msg)
+
+        # Reset velocities?
+        self.vel_msg.linear.x  = 0.0
+        self.vel_msg.angular.z = 0.0
 
     def unscale_coordinates(self, coords):
         origin_x = self.map.info.origin.position.x
@@ -210,7 +204,7 @@ class CustomNode(Node):
         marker.type = Marker.POINTS
         marker.action = Marker.ADD
         marker.header.stamp = self.get_clock().now().to_msg()
-        marker.lifetime = rclpy.duration.Duration(seconds=4).to_msg()
+        # marker1.lifetime = rclpy.duration.Duration(seconds=4).to_msg()
         marker.id = 0
         marker.ns = "frontier_markers"
 
@@ -237,7 +231,7 @@ class CustomNode(Node):
         marker1.type = Marker.POINTS
         marker1.action = Marker.ADD
         marker1.header.stamp = self.get_clock().now().to_msg()
-        marker1.lifetime = rclpy.duration.Duration(seconds=4).to_msg()
+        # marker1.lifetime = rclpy.duration.Duration(seconds=4).to_msg()
         marker1.id = 1
         marker1.ns = "goal_marker"
 
@@ -264,7 +258,7 @@ class CustomNode(Node):
         marker.type = Marker.LINE_STRIP
         marker.action = Marker.ADD
         marker.header.stamp = self.get_clock().now().to_msg()
-        marker.lifetime = rclpy.duration.Duration(seconds=2).to_msg()
+        # marker.lifetime = rclpy.duration.Duration(seconds=2).to_msg()
         marker.id = 1
         marker.ns = "path"
         for pair in unscaled_points:
@@ -289,9 +283,8 @@ class CustomNode(Node):
 
 
     def rrt(self, startnode, goalnode):
-        DSTEP = 5 # FIXME
         SMAX = 50000
-        NMAX = 1500
+        NMAX = 10000
 
         # Start the tree with the startnode (set no parent just in case).
         startnode.parent = None
@@ -306,9 +299,8 @@ class CustomNode(Node):
         # Loop - keep growing the tree.
         steps = 0
         while True:
-            # rclpy.spin_once(self)
             # Determine the target state.
-            if random.random() <= 0.3:
+            if random.random() <= 0.4:
                 target_coords = np.array(goalnode.coordinates())
             else:
                 target_coords = np.array([random.randint(0, MAP_HEIGHT-1),
@@ -319,20 +311,17 @@ class CustomNode(Node):
             distances = np.array([node.distance(targetnode) for node in tree])
             index     = np.argmin(distances)
             nearnode  = tree[index]
-            d         = distances[index]
-
-            if d==0:
-                d = 1
 
             # Determine the next node.
             near_coords = np.array(nearnode.coordinates())
-            step = (target_coords - near_coords) * DSTEP / d
-            if np.linalg.norm(step):
+            if np.array_equal(target_coords, near_coords):
                 continue
-            nextnode_coords = np.ceil(np.array(near_coords + (target_coords - near_coords) * DSTEP / d)).astype(int)
+
+            step = np.sqrt(2) * (target_coords - near_coords) / np.linalg.norm((target_coords - near_coords))
+            nextnode_coords = (np.array(near_coords + step)).astype(int)
 
             if np.array_equal(near_coords, nextnode_coords):
-                print("SAMEEEEEEEE")
+                print("COORDINATAES ARE THE SAME - THIS SHOULD NEVER HAPPEN")
 
 
             nextnode = MapNode(*nextnode_coords)
@@ -344,7 +333,7 @@ class CustomNode(Node):
 
                     # If within DSTEP, also try connecting to the goal.  If
                     # the connection is made, break the loop to stop growing.
-                    if nextnode.distance(goalnode) <= DSTEP:
+                    if nextnode.distance(goalnode) <= 1:
                         addtotree(nextnode, goalnode)
                         break
             else:
@@ -375,14 +364,13 @@ class CustomNode(Node):
             if path[i].connectsTo(path[i+2], self.map_array):
                 path.pop(i+1)
             else:
-                i = i+1
+                i += 1
 
 
     # Run the terminal input loop, send the commands, and ROS spin.
     def loop(self, screen):
-
-        # Initialize the velocity and remaining active time.
-        vel = (0.0, 0.0)
+        # Initialize the controller
+        controller = RobotController()
 
 
         # Run the loop until shutdown.
@@ -394,9 +382,6 @@ class CustomNode(Node):
             if now - self.node_start_time < 5e9:
                 continue
 
-            # Reduce the active time and stop if necessary.
-            vel = (0.0, 0.0)
-
             pos = self.odom.pose.pose.position
             goal = self.get_goal(pos)
             screen.addstr(9, 0, f"Goal: {goal}")
@@ -406,66 +391,30 @@ class CustomNode(Node):
             pos_x, pos_y = pos.x, pos.y
             scaled_pos_y, scaled_pos_x = self.scale_coordinates([(pos_y, pos_x)])[0]
             screen.addstr(10, 0, f"position: {scaled_pos_x, scaled_pos_y}")
-            try:
-                if scaled_pos_x != goal[0] and scaled_pos_y != goal[1]:
-                    path = self.rrt(MapNode(scaled_pos_y, scaled_pos_x), MapNode(*goal))
-                    if not path == None:
-                        # self.PostProcess(path)
-                        path_points = [node.coordinates() for node in path]
-                        self.publish_path_marker(path_points)
+            screen.addstr(11, 0, f"orientation: {self.odom.pose.pose.orientation.z}")
+            if scaled_pos_x != goal[0] and scaled_pos_y != goal[1]:
+                path = self.rrt(MapNode(scaled_pos_y, scaled_pos_x), MapNode(*goal))
+                if not path == None:
+                    self.PostProcess(path)
+                    path_points = [node.coordinates() for node in path]
+                    unscaled_path_points = self.unscale_coordinates(path_points)
+                    self.publish_path_marker(path_points)
+                    controller.update_path(unscaled_path_points)
 
-                        # drive the path
-                        # for node in path_points:
-                        #     rclpy.spin_once(self)
-                        #     robot_pos = self.odom.pose.pose.position
-                        #     if robot_pos.x == path_points[-1][0] and robot_pos.y == path_points[-1][1]:
-                        #         break
+                    controller.run(self, self.get_pose, self.publish_velocity, rclpy.spin_once)
 
 
-                    else:
-                        print("NO PATH FOUND")
-            except Exception as e:
-                print("failed")
-                print(e)
-
-            # path following
+                else:
+                    print("NO PATH FOUND")
+            # except Exception as e:
+            #     print("failed")
+            #     print(e)
 
 
-
-
-
-
-                # pos = self.odom.pose.pose.position
-                # heading = self.odom.pose.pose.orientation.z
-                # angular_vel_multiplier = random.gauss(0, std)
-                # angular_vel = angular_vel_multiplier * WNOM
-                # forward_vel = forward_vel_multiplier * VNOM
-                # if not self.is_colliding(pos, heading, forward_vel_multiplier,
-                #                          angular_vel_multiplier, screen):
-                #     vel = (forward_vel, angular_vel)
-                #     std = np.pi/2
-                #     if forward_vel_multiplier < 1:
-                #         forward_vel_multiplier += 0.005
-                #     break
-                # else:
-                #     print(forward_vel_multiplier)
-                #     if std < 10*np.pi:
-                #         std += 0.1
-                #     if forward_vel_multiplier > -1:
-                #         forward_vel_multiplier -= 0.1
-                #     vel = (0.0, 0.0)
-
-
-            # Update the message and publish.
-            self.msg.linear.x  = vel[0]
-            self.msg.angular.z = vel[1]
-            # self.pub.publish(self.msg)
 
             # print(len(self.get_frontier_idxs()))
 
             screen.clrtoeol()
-            screen.addstr(11, 0,
-                        "Sending fwd = %6.3fm/s, spin = %6.3frad/sec" % vel)
             screen.refresh()
 
             # Spin once to process other items.
