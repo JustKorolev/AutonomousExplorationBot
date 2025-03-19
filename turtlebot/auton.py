@@ -41,6 +41,8 @@ WNOM = 0.5         # This gives a turning radius of v/w = 0.5m
 RESOLUTION = 0.05
 BOT_WIDTH = 7 # BOT DIMENSIONS ARE BIGGER THAN ACTUAL FOR TOLERANCE
 BOT_LENGTH = 7
+BOT_WIDTH_CLEARANCE = 10
+BOT_LENGTH_CLEARANCE = 10
 MAP_WIDTH  = 360
 MAP_HEIGHT = 240
 ORIGIN_X   = -9.00              # Origin = location of lower-left corner
@@ -118,8 +120,10 @@ class CustomNode(Node):
 
     def get_pose(self):
         pose = self.odom.pose.pose
+        orientation = 2 * np.atan2(pose.orientation.z,
+                                   pose.orientation.w)
         return np.array([pose.position.x, pose.position.y]),\
-               pose.orientation.z
+               orientation
 
     def publish_velocity(self, lin_vel, ang_vel):
         self.vel_msg.linear.x  = lin_vel
@@ -147,6 +151,23 @@ class CustomNode(Node):
         coords[:,0] -= origin_y
         scaled_coords = coords / RESOLUTION
         return list(scaled_coords.astype(int))
+
+
+    def is_colliding(self, position, direction):
+        step = 2 * np.flip(direction)
+        step[0] *= -1 # since downwards is actually increasing y in the map
+        pos_x, pos_y = position
+        new_pos_y, new_pos_x = (np.array(self.scale_coordinates([[pos_y, pos_x]])) + step)[0]
+        min_x = max(int(new_pos_x - 2), 0)
+        max_x = min(int(new_pos_x + 2), MAP_WIDTH - 1)
+        min_y = max(int(new_pos_y - 2), 0)
+        max_y = min(int(new_pos_y + 2), MAP_HEIGHT - 1)
+
+        if np.any(self.map_array[min_x:max_x+1, min_y:max_y+1] > OBSTACLE_THRESH):
+            print("COLLISION DETECTED AHEAD")
+            return True  # Collision detected
+        return False  # No collision
+
 
     def get_frontier_idxs(self):
         # FIND FRONTIER CELLS
@@ -249,8 +270,6 @@ class CustomNode(Node):
         self.marker_pub.publish(marker1)
 
 
-
-
     def publish_path_marker(self, points):
         unscaled_points = self.unscale_coordinates((points))
         marker = Marker()
@@ -300,7 +319,7 @@ class CustomNode(Node):
         steps = 0
         while True:
             # Determine the target state.
-            if random.random() <= 0.4:
+            if random.random() <= 0.3:
                 target_coords = np.array(goalnode.coordinates())
             else:
                 target_coords = np.array([random.randint(0, MAP_HEIGHT-1),
@@ -317,7 +336,8 @@ class CustomNode(Node):
             if np.array_equal(target_coords, near_coords):
                 continue
 
-            step = np.sqrt(2) * (target_coords - near_coords) / np.linalg.norm((target_coords - near_coords))
+            scale = 5
+            step = scale * (target_coords - near_coords) / np.linalg.norm((target_coords - near_coords))
             nextnode_coords = (np.array(near_coords + step)).astype(int)
 
             if np.array_equal(near_coords, nextnode_coords):
@@ -333,7 +353,7 @@ class CustomNode(Node):
 
                     # If within DSTEP, also try connecting to the goal.  If
                     # the connection is made, break the loop to stop growing.
-                    if nextnode.distance(goalnode) <= 1:
+                    if nextnode.distance(goalnode) <= scale:
                         addtotree(nextnode, goalnode)
                         break
             else:
@@ -382,26 +402,35 @@ class CustomNode(Node):
             if now - self.node_start_time < 5e9:
                 continue
 
-            pos = self.odom.pose.pose.position
+            pose = self.odom.pose.pose
+            pos = pose.position
             goal = self.get_goal(pos)
             screen.addstr(9, 0, f"Goal: {goal}")
             self.publish_goal_marker(goal)
 
             # Calculate path using RRT
             pos_x, pos_y = pos.x, pos.y
+            orientation = 2 * np.atan2(pose.orientation.z,
+                                       pose.orientation.w)
             scaled_pos_y, scaled_pos_x = self.scale_coordinates([(pos_y, pos_x)])[0]
             screen.addstr(10, 0, f"position: {scaled_pos_x, scaled_pos_y}")
-            screen.addstr(11, 0, f"orientation: {self.odom.pose.pose.orientation.z}")
+            screen.addstr(11, 0, f"orientation: {orientation}")
+
             if scaled_pos_x != goal[0] and scaled_pos_y != goal[1]:
+                goal = [120, 140] # test
                 path = self.rrt(MapNode(scaled_pos_y, scaled_pos_x), MapNode(*goal))
                 if not path == None:
                     self.PostProcess(path)
                     path_points = [node.coordinates() for node in path]
                     unscaled_path_points = self.unscale_coordinates(path_points)
+                    unscaled_path_points[0] = (pos_y, pos_x)
                     self.publish_path_marker(path_points)
                     controller.update_path(unscaled_path_points)
 
-                    controller.run(self, self.get_pose, self.publish_velocity, rclpy.spin_once)
+
+                    controller.run(self, self.get_pose, self.publish_velocity,
+                                   self.is_colliding, rclpy.spin_once)
+                    controller.reset()
 
 
                 else:

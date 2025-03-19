@@ -60,11 +60,10 @@ class Node:
     # Collision functions:
     # Check whether in free space.
     def inFreespace(self, map_array):
-        flipped_map = map_array.T
         if (self.x <= 0 or self.x >= MAP_WIDTH or
             self.y <= 0 or self.y >= MAP_HEIGHT):
             return False
-        return flipped_map[self.coordinates()] < OBSTACLE_THRESH
+        return map_array[self.coordinates()] < OBSTACLE_THRESH
 
     # Check the local planner - whether this connects to another node.
     def connectsTo(self, other, map_array):
