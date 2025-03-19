@@ -27,7 +27,7 @@ def generate_launch_description():
     worldfile = os.path.join(pkgdir('turtlebot3_gazebo'),
                              'worlds', 'turtlebot3_house.world')
     # worldfile = os.path.join(pkgdir('turtlebot3_gazebo'),
-    #                          'worlds', 'turtlebot3_dqn_stage4.world')
+                            #  'worlds', 'turtlebot3_dqn_stage4.world')
 
     # MODEL: Locate the Gazebo TurtleBot model: With clean or noisy lidar.
     # The original is: turtlebot3_gazebo/models/turtlebot3_waffle/model.sdf
@@ -205,8 +205,8 @@ def generate_launch_description():
         # the robot), as well as ONE of the localizations (to locate
         # the robot in the map): perfect or noisy.
         node_robot_state_publisher,
-        node_perfectlocalization,
-        # node_noisylocalization,
+        # node_perfectlocalization,
+        node_noisylocalization,
 
         # MAP: Use either the first two lines (together, to show the
         # perfect map).  OR the last line to start your code...

@@ -7,7 +7,7 @@ def wrapto180(angle):
     return angle - 2 * np.pi * round(angle / (2 * np.pi))
 
 class RobotController:
-    def __init__(self, Kp_ang=2, Kd_ang=0.0003, Kp_lin=0.8, Kd_lin=0.05, goal_tolerance=0.1, alpha=0.2, log_file="robot_controller.log"):
+    def __init__(self, Kp_ang=2, Kd_ang=0.0001, Kp_lin=0.8, Kd_lin=0.07, goal_tolerance=0.1, alpha=0.2, log_file="robot_controller.log"):
         self.pos = np.zeros(2)
         self.orientation = 0
         self.path = None

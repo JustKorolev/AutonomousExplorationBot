@@ -60,8 +60,8 @@ class Node:
     # Collision functions:
     # Check whether in free space.
     def inFreespace(self, map_array):
-        if (self.x <= 0 or self.x >= MAP_WIDTH or
-            self.y <= 0 or self.y >= MAP_HEIGHT):
+        if (self.x <= 0 or self.x >= MAP_HEIGHT or
+            self.y <= 0 or self.y >= MAP_WIDTH):
             return False
         return map_array[self.coordinates()] < OBSTACLE_THRESH
 
