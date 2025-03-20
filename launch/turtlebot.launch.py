@@ -27,7 +27,7 @@ def generate_launch_description():
     worldfile = os.path.join(pkgdir('turtlebot3_gazebo'),
                              'worlds', 'turtlebot3_house.world')
     # worldfile = os.path.join(pkgdir('turtlebot3_gazebo'),
-                            #  'worlds', 'turtlebot3_dqn_stage4.world')
+    #                          'worlds', 'turtlebot3_dqn_stage4.world')
 
     # MODEL: Locate the Gazebo TurtleBot model: With clean or noisy lidar.
     # The original is: turtlebot3_gazebo/models/turtlebot3_waffle/model.sdf

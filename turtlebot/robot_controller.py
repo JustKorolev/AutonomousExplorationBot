@@ -6,7 +6,7 @@ def wrapto180(angle):
     return angle - 2 * np.pi * round(angle / (2 * np.pi))
 
 class RobotController:
-    def __init__(self, Kp_ang=1, Kd_ang=0.2, Kp_lin=1, Kd_lin=0.3, goal_tolerance=0.05, alpha=0.2):
+    def __init__(self, Kp_ang=1, Kd_ang=0.3, Kp_lin=1, Kd_lin=0.3, goal_tolerance=0.05, alpha=0.2):
         self.pos = np.zeros(2)
         self.orientation = 0
         self.path = None
@@ -88,7 +88,6 @@ class RobotController:
             # Only drive forward if facing the right direction
             if abs(self.filtered_angle_error) >= 0.1:
                 linear_velocity = 0.0
-                time.sleep(0.2)
 
             # Send the velocity command
             send_velocity(linear_velocity, angular_velocity)
