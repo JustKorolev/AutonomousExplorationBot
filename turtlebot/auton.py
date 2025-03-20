@@ -58,6 +58,7 @@ CLEAR_NEIGHBOR_FRONTIER_THRESH = 5
 FRONTIER_WEIGHT_DECREMENT = 0.2
 FRONTIER_RADIUS = 8
 HEUR_DISTANCE_WEIGHT = 5
+RRT_GOAL_SELECT_FRACTION = 0.3
 
 def wrapto180(angle):
     return angle - 2*np.pi * round(angle/(2*np.pi))
@@ -331,7 +332,7 @@ class CustomNode(Node):
 
 
     def rrt(self, startnode, goalnode):
-        SMAX = 50000
+        SMAX = 25000
         NMAX = 10000
 
         # Start the tree with the startnode (set no parent just in case).
@@ -348,7 +349,7 @@ class CustomNode(Node):
         steps = 0
         while True:
             # Determine the target state.
-            if random.random() <= 0.3:
+            if random.random() <= RRT_GOAL_SELECT_FRACTION:
                 target_coords = np.array(goalnode.coordinates())
             else:
                 target_coords = np.array([random.randint(0, MAP_HEIGHT-1),
@@ -472,7 +473,6 @@ class CustomNode(Node):
             screen.addstr(11, 0, f"orientation: {orientation}")
 
             if scaled_pos_x != goal[0] and scaled_pos_y != goal[1]:
-                # goal = [120, 140] # test
                 path = self.rrt(MapNode(scaled_pos_y, scaled_pos_x), MapNode(*goal))
                 if not path == None:
                     path = self.PostProcess(path)
@@ -496,7 +496,6 @@ class CustomNode(Node):
 
 
 
-            # print(len(self.get_frontier_idxs()))
 
             screen.clrtoeol()
             screen.refresh()

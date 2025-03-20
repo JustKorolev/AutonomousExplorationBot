@@ -88,6 +88,7 @@ class RobotController:
             # Only drive forward if facing the right direction
             if abs(self.filtered_angle_error) >= 0.1:
                 linear_velocity = 0.0
+                time.sleep(0.2)
 
             # Send the velocity command
             send_velocity(linear_velocity, angular_velocity)
