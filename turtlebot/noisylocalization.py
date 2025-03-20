@@ -1,346 +1,311 @@
 #!/usr/bin/env python3
-#
-#   noisylocalization.py
-#
-#   Simulate noisy odometry or drifting localization.
-#
-#   Node:       /localization
-#
-#   Subscribe:  /odom                   sensor_msgs/Lsaerscan
-#   Publish:    -nothing-
-#
-#   TF Broadcast:  odom frame in map fram
-#
+
 import numpy as np
+import math
+from math import pi, sin, cos, atan2, sqrt
+from scipy.spatial import KDTree
 
-from math                       import pi, sin, cos, atan2, sqrt
-from scipy.spatial      import KDTree
-
-# ROS Imports
 import rclpy
+from rclpy.node import Node
+from rclpy.time import Time
+from rclpy.duration import Duration
+from rclpy.qos import QoSProfile, DurabilityPolicy
 
-from rclpy.node                 import Node
-from rclpy.time                 import Time
+from geometry_msgs.msg import Point, TransformStamped
+from nav_msgs.msg import Odometry, OccupancyGrid
+from sensor_msgs.msg import LaserScan
+from visualization_msgs.msg import Marker, MarkerArray
 
-from tf2_ros                    import TransformBroadcaster
-from tf2_ros                    import TransformException
-from tf2_ros.buffer             import Buffer
-from tf2_ros.transform_listener import TransformListener
-from transforms3d.euler import euler2quat
-from rclpy.qos                  import QoSProfile, DurabilityPolicy
+from tf2_ros import TransformBroadcaster, TransformException, Buffer, TransformListener
+import logging
 
-from geometry_msgs.msg          import Point, Quaternion, Pose
-from geometry_msgs.msg          import Transform, TransformStamped
-from nav_msgs.msg               import Odometry
-from nav_msgs.msg               import OccupancyGrid
-from sensor_msgs.msg            import LaserScan
-from visualization_msgs.msg     import Marker
-from visualization_msgs.msg     import MarkerArray
-from geometry_msgs.msg import Point
+# ----------------------------------------------------
+# User-configurable parameters
+# ----------------------------------------------------
+OBSTACLE_THRES         = 85    # Occupancy threshold for obstacles.
+TURN_THRESHOLD         = 0.1   # Skip scan update if turning too fast.
+TIME_OFFSET            = 0.05  # (Not used now, since we use latest transform)
+CAN_TRANSFORM_TIMEOUT  = 0.3   # Seconds.
 
+UPDATE_FACTOR   = 0.05         # Fraction to integrate per scan.
+MAX_MEAN_ERROR  = 0.5          # Maximum allowed mean alignment error (m).
+MAX_UPDATE_NORM = 0.1          # Maximum allowed translation update (m).
+EXTRAPOLATION_THRESHOLD = 0.3  # Maximum allowed transform time difference.
 
-#
-#   Global Definitions
-#
-R = 0.3                 # Radius to convert angle to distance.
+# Noise standard deviations (tweak these values)
+NOISE_STD_X     = 0.05        # meters
+NOISE_STD_Y     = 0.05        # meters
+NOISE_STD_THETA = 0.05        # radians
 
-NOISE = 0.12            # Noise fraction
-
-OBSTACLE_THRES = 85
-
-
-#
-#   Angle Wrapping
-#
-def wrapto90(angle):
-    return angle -   pi * round(angle/(  pi))
 def wrapto180(angle):
-    return angle - 2*pi * round(angle/(2*pi))
+    return angle - 2 * pi * round(angle/(2*pi))
 
-
-#
-#   Custom Node Class
-#
 class CustomNode(Node):
-    # Initialization.
     def __init__(self, name):
-        # Initialize the node, naming it as specified
         super().__init__(name)
+        # Adjust logfile path as needed.
+        logging.basicConfig(
+            filename='/home/baaqerfarhat/robotws/src/turtlebot/turtlebot/logfile.log',
+            level=logging.INFO,
+            format='%(asctime)s %(message)s'
+        )
+        self.logger = logging.getLogger(__name__)
 
-        # Set the initial drift value.
-        self.x = 0.0
-        self.y = 0.0
-        self.theta = 0.0
+        # ---- Fixed drift→odom error simulation ----
+        self.fixed_x_error = 0.0      
+        self.fixed_theta_error = 0.0  
+        self.fixed_y_error = 0.0      
 
-        # Set the initial odometry reading.
-        self.odom = None
+        self.x     = self.fixed_x_error
+        self.y     = self.fixed_y_error
+        self.theta = self.fixed_theta_error
 
-        # Set the initial map to empty
+        # Map→drift correction (initialize to identity).
+        self.dx_map = 0.0
+        self.dy_map = 0.0
+        self.dt_map = 0.0
+
         self.map = OccupancyGrid()
-        self.scan = LaserScan()
+        self.latest_scan = None
+        self.angular_velocity = 0.0
 
-        # Initialize the transform broadcaster
+        # TF Broadcaster
         self.tfBroadcaster = TransformBroadcaster(self)
+        qos_transient = QoSProfile(durability=DurabilityPolicy.TRANSIENT_LOCAL, depth=1)
+        self.marker_pub = self.create_publisher(MarkerArray, '/visualization_marker_array', 1)
 
-        quality = QoSProfile(durability=DurabilityPolicy.TRANSIENT_LOCAL,
-                             depth=1)
-
-        self.marker_pub = self.create_publisher(MarkerArray,
-                                        '/visualization_marker_array', 1)
-
-        # Create subscribers
+        # Subscriptions
         self.create_subscription(Odometry, '/odom', self.odomCB, 1)
-        self.create_subscription(LaserScan, '/scan', self.updateScan, 1)
-        self.create_subscription(OccupancyGrid, '/map', self.updateMap, quality)
+        self.create_subscription(LaserScan, '/scan', self.scanCB, 1)
+        self.create_subscription(OccupancyGrid, '/map', self.updateMap, qos_transient)
 
-        # Instantiate a TF listener.
-        self.tfBuffer   = Buffer()
+        # TF Buffer/Listener
+        self.tfBuffer = Buffer()
         self.tfListener = TransformListener(self.tfBuffer, self)
 
-    # Shutdown
     def shutdown(self):
-        # No particular cleanup, just shut down the node.
         self.destroy_node()
 
     def updateMap(self, msg):
         self.map = msg
+        self.get_logger().info("Map updated.")
 
-    def updateScan(self, msg):
-        self.scan = msg
+    def odomCB(self, msg: Odometry):
+        self.angular_velocity = msg.twist.twist.angular.z
+        self.x = self.fixed_x_error
+        self.y = self.fixed_y_error
+        self.theta = self.fixed_theta_error
 
-    def correct_odometry(self, x_prev, y_prev, theta_prev):
-        try:
-            tfmsg = self.tfBuffer.lookup_transform(
-                'map', self.scan.header.frame_id, rclpy.time.Time())
-        except TransformException as ex:
-            self.get_logger().warn("Unable to get transform: %s" % (ex,))
-            return
+        self.get_logger().info(
+            f"Fixed Drift→odom: x={self.x:.2f}, y={self.y:.2f}, theta={self.theta:.2f}"
+        )
 
-        # Extract the laser scanner's position and orientation.
-        xc     = tfmsg.transform.translation.x
-        yc     = tfmsg.transform.translation.y
-        thetac = 2 * np.arctan2(tfmsg.transform.rotation.z,
-                                tfmsg.transform.rotation.w)
-
-        # Grab the rays: each ray's range and angle relative to the
-        # turtlebot's position and orientation.
-        rmin     = self.scan.range_min        # Sensor minimum range to be valid
-        rmax     = self.scan.range_max        # Sensor maximum range to be valid
-        ranges   = self.scan.ranges           # List of ranges for each angle
-
-        thetamin = self.scan.angle_min        # Min angle (0.0)
-        thetamax = self.scan.angle_max        # Max angle (2pi)
-        thetainc = self.scan.angle_increment  # Delta between angles (2pi/360)
-        thetas   = np.arange(thetamin, thetamax, thetainc)
-
-        ORIGIN_X = self.map.info.origin.position.x
-        ORIGIN_Y = self.map.info.origin.position.y
-        RESOLUTION = self.map.info.resolution
-        HEIGHT = self.map.info.height
-        WIDTH = self.map.info.width
-        if RESOLUTION == 0:
-            return
-
-        scan_points = []
-        u, v = (xc - ORIGIN_X) / RESOLUTION, (yc - ORIGIN_Y) / RESOLUTION
-
-        for theta, _range in zip(thetas, ranges):
-            direction = theta + thetac
-            if rmin < _range < rmax:
-                dist = _range / RESOLUTION
-                u_f, v_f = u + dist*np.cos(direction), v + dist*np.sin(direction)
-                scan_points.append((u_f, v_f))
-
-        map_data = np.array(self.map.data).reshape((HEIGHT, WIDTH))
-        map_points = []
-        for y in range(HEIGHT):
-            for x in range(WIDTH):
-                if map_data[y, x] > OBSTACLE_THRES:
-                    map_points.append((x, y))
-
-
-        try:
-            kdtree  = KDTree(map_points)
-            near_map_indices = [kdtree.query(scan_point, k=1)[1] for scan_point in scan_points]
-            near_map_points = [map_points[int(index)] for index in near_map_indices]
-            N = min(len(near_map_points), len(scan_points))
-            # near_map_points = near_map_points[:N]
-            # scan_points = scan_points[:N]
-            scan_points = self.unscale_coordinates(scan_points)
-            near_map_points = self.unscale_coordinates(near_map_points)
-
-            # TESTING WITH MARKERS
-            self.publish_line_marker(zip(near_map_points, scan_points))
-
-            P = np.array(near_map_points)
-            Q = np.array(scan_points)
-
-            # Compute centroids
-            p_centroid = np.mean(P, axis=0)
-            q_centroid = np.mean(Q, axis=0)
-
-            # Compute offset arrays
-            P_offset = P - p_centroid
-            Q_offset = Q - q_centroid
-
-            # Compute Covariance Matrix
-            H = P_offset.T @ Q_offset
-
-            # Calculate SVD
-            U, _, Vh = np.linalg.svd(H)
-            d = np.linalg.det(U @ Vh)
-            m = np.eye(2)
-            m[1, 1] = d
-            R = U @ m @ Vh
-            t = p_centroid - R @ q_centroid
-        except Exception as e:
-            print(e)
-            return
-
-        if N > 100:
-            print("updated")
-            pos_prev = np.array([x_prev, y_prev])
-            pos_new = np.array(R @ pos_prev + t)
-            pos_updated = 0.2*pos_prev + 0.8*pos_new
-            delta = np.arctan2(R[1, 0], R[0, 0])
-            theta_updated = theta_prev - delta
-            # print(theta_updated)
-            q = euler2quat(0, 0, theta_updated)
-            updated_pose = Pose()
-            updated_pose.position.x = pos_updated[0]
-            updated_pose.position.y = pos_updated[1]
-            updated_pose.orientation = Quaternion(x=q[1], y=q[2], z=q[3], w=q[0])
-            updated_odom = Odometry()
-            updated_odom.pose.pose = updated_pose
-            return updated_odom
-
-
-
-    # Odometry CB.  See how far we've moved and drift accordingly.
-    def odomCB(self, msg):
-        # Check if we have an old value.
-        if self.odom is None:
-            self.odom = msg.pose.pose
-            return
-
-        # Grab the new odometry reading.
-        x1 = msg.pose.pose.position.x
-        y1 = msg.pose.pose.position.y
-        t1 = 2 * atan2(msg.pose.pose.orientation.z,
-                       msg.pose.pose.orientation.w)
-
-        # Grab the old odometry reading.
-        x0 = self.odom.position.x
-        y0 = self.odom.position.y
-        t0 = 2 * atan2(self.odom.orientation.z,
-                       self.odom.orientation.w)
-
-        # Save the new reading.
-        now  = self.get_clock().now().seconds_nanoseconds()[0]
-        # if not now % 2:
-        #     self.odom = self.correct_odometry(x1, y1, t1)
-        #     print(f"New odometry: {self.odom}")
-        # else:
-        self.odom = msg.pose.pose
-        # Compute the magnitude of the difference.
-        d = sqrt((x1-x0)**2 + (y1-y0)**2 + (R*wrapto180(t1-t0))**2)
-
-        # Drift we want on the new position.
-        if True:
-            dx = np.random.uniform(-d  *NOISE, d  *NOISE)
-            dy = np.random.uniform(-d  *NOISE, d  *NOISE)
-            dt = np.random.uniform(-d/R*NOISE, d/R*NOISE)
-        else:
-            dx = -0.1 * (x1-x0)
-            dy = -0.1 * (y1-y0)
-            dt = -0.1 * wrapto180(t1-t0)
-
-        # Matching drift to the odometry frame.
-        dx += (1-cos(dt))*x1 + sin(dt)*y1
-        dy += (1-cos(dt))*y1 - sin(dt)*x1
-
-        # Update the odometry frame.
-        self.x     += cos(self.theta) * dx - sin(self.theta) * dy
-        self.y     += sin(self.theta) * dx + cos(self.theta) * dy
-        self.theta += dt
-
-
-        # Broadcast the new drift.
         tfmsg = TransformStamped()
-
-        tfmsg.header.stamp            = msg.header.stamp
-        tfmsg.header.frame_id         = 'map'
-        tfmsg.child_frame_id          = 'odom'
+        tfmsg.header.stamp = msg.header.stamp
+        tfmsg.header.frame_id = 'drift'
+        tfmsg.child_frame_id  = 'odom'
         tfmsg.transform.translation.x = self.x
         tfmsg.transform.translation.y = self.y
-        tfmsg.transform.rotation.z    = sin(self.theta/2)
-        tfmsg.transform.rotation.w    = cos(self.theta/2)
-
+        tfmsg.transform.rotation.z = math.sin(self.theta/2.0)
+        tfmsg.transform.rotation.w = math.cos(self.theta/2.0)
         self.tfBroadcaster.sendTransform(tfmsg)
+        self.broadcastMapCorrection()
 
-        #print('Sent transform (%6.3f, %6.3f, %6.3f)' %
-        #      (self.x, self.y, self.theta))
+    def transform_point(self, point, dx, dy, dtheta):
+        # Assuming point is a 2D coordinate (x, y)
+        x, y = point
+        # Apply the rotation (dtheta) and translation (dx, dy)
+        x_new = cos(dtheta) * x - sin(dtheta) * y + dx
+        y_new = sin(dtheta) * x + cos(dtheta) * y + dy
+        return (x_new, y_new)
 
+    def publish_line_marker(self, point_pairs):
+        markers = []
+        now = self.get_clock().now().to_msg()
+        for i, (ptA, ptB) in enumerate(point_pairs):
+            # Here you might apply a condition to only show markers if the distance is below 0.2
+            distance = math.sqrt((ptA[0] - ptB[0])**2 + (ptA[1] - ptB[1])**2)
+            if distance > 0.2:
+                continue
 
-    def unscale_coordinates(self, coords):
-        RESOLUTION = self.map.info.resolution
-        origin_x = self.map.info.origin.position.x
-        origin_y = self.map.info.origin.position.y
-        coords = np.array(coords)
-        unscaled_coords = coords * RESOLUTION
-        unscaled_coords[:,0] += origin_x
-        unscaled_coords[:,1] += origin_y
-        return list(unscaled_coords)
-
-
-    def publish_line_marker(self, points):
-        marker_list = []
-        for i, pair in enumerate(points):
-            marker = Marker()
-            marker.header.frame_id = "map"  # Change "map" to "odom" if "map" doesn't exist
-            marker.type = Marker.LINE_STRIP
-            marker.action = Marker.ADD
-            # marker.header.stamp = self.get_clock().now().to_msg()
-            marker.lifetime = rclpy.duration.Duration(seconds=2).to_msg()
-            marker.id = i
-            marker.ns = "line_markers"
-
-            p1 = Point()
-            p1.x, p1.y = float(pair[0][0]), float(pair[0][1])
-
-            p2 = Point()
-            p2.x, p2.y = float(pair[1][0]), float(pair[1][1])
-
-            marker.points.append(p1)
-            marker.points.append(p2)
-
-            marker.scale.x = 0.05 # Line width
-            marker.color.r = 0.0
-            marker.color.g = 0.7
-            marker.color.b = 0.5
-            marker.color.a = 1.0
-
-            marker_list.append(marker)
-
-        marker_array = MarkerArray(markers=marker_list)
-        self.marker_pub.publish(marker_array)
+            mk = Marker()
+            mk.header.frame_id = "map"
+            mk.type = Marker.LINE_STRIP
+            mk.action = Marker.ADD
+            mk.id = i
+            mk.ns = "line_markers"
+            mk.header.stamp = now
+            mk.lifetime = Duration(seconds=0).to_msg()  # persistent
+            mk.scale.x = 0.1  # line width
+            mk.color.r = 0.0
+            mk.color.g = 0.7
+            mk.color.b = 0.5
+            mk.color.a = 1.0
+            pA = Point(x=float(ptA[0]), y=float(ptA[1]))
+            pB = Point(x=float(ptB[0]), y=float(ptB[1]))
+            mk.points.append(pA)
+            mk.points.append(pB)
+            markers.append(mk)
+        self.marker_pub.publish(MarkerArray(markers=markers))
 
 
+    def computeAlignmentLS(self, scan: LaserScan):
+        # Instead of using the scan timestamp, use the latest available transform.
+        try:
+            tfmsg = self.tfBuffer.lookup_transform(
+                'drift', scan.header.frame_id,
+                Time(),  # Use the current time to get the latest transform.
+                timeout=Duration(seconds=CAN_TRANSFORM_TIMEOUT))
+        except TransformException as ex:
+            self.get_logger().warn(f"Unable to get drift->scan transform using latest time: {ex}")
+            return None
 
-#
-#   Main Code
-#
+        # Optionally, you can check the time difference if needed.
+        # (If you do, make sure it doesn't block or cause extrapolation issues.)
+        
+        # --- Add noise to the sensor reading ---
+        sensor_x = tfmsg.transform.translation.x + np.random.normal(0, NOISE_STD_X)
+        sensor_y = tfmsg.transform.translation.y + np.random.normal(0, NOISE_STD_Y)
+        sensor_theta = (2.0 * math.atan2(tfmsg.transform.rotation.z, tfmsg.transform.rotation.w)
+                        + np.random.normal(0, NOISE_STD_THETA))
+
+        # Compute scan points in the drift frame.
+        rmin = scan.range_min
+        rmax = scan.range_max
+        angles = np.arange(scan.angle_min, scan.angle_max, scan.angle_increment)
+        scan_pts_drift = []
+        for ang, rng in zip(angles, scan.ranges):
+            if rmin < rng < rmax:
+                effective_ang = sensor_theta + ang
+                x_d = sensor_x + rng * math.cos(effective_ang)
+                y_d = sensor_y + rng * math.sin(effective_ang)
+                scan_pts_drift.append((x_d, y_d))
+        if len(scan_pts_drift) < 20:
+            return None
+
+        Q = np.array(scan_pts_drift)
+
+        # Extract obstacle points from the occupancy grid.
+        H = self.map.info.height
+        W = self.map.info.width
+        ORIGIN_X = self.map.info.origin.position.x
+        ORIGIN_Y = self.map.info.origin.position.y
+        RES = self.map.info.resolution
+        grid = np.array(self.map.data).reshape((H, W))
+        map_pts = []
+        for row in range(H):
+            for col in range(W):
+                if grid[row, col] > OBSTACLE_THRES:
+                    map_pts.append((col, row))
+        if len(map_pts) < 20:
+            return None
+
+        def unscale(arr):
+            arr = np.array(arr, dtype=float)
+            arr[:, 0] = arr[:, 0] * RES + ORIGIN_X
+            arr[:, 1] = arr[:, 1] * RES + ORIGIN_Y
+            return arr
+
+        P_all = unscale(map_pts)
+
+        kdtree = KDTree(P_all)
+        idxs = [kdtree.query(q, k=1)[1] for q in Q]
+        P = np.array([P_all[i] for i in idxs])
+
+        diffs = np.linalg.norm(P - Q, axis=1)
+        mean_diff = np.mean(diffs)
+        self.logger.info(f"Differences before correction: mean={mean_diff:.2f}")
+        self.publish_line_marker(zip(P, Q))
+
+        if len(P) < 20 or mean_diff > MAX_MEAN_ERROR:
+            self.get_logger().warn(f"Alignment error {mean_diff:.2f} exceeds threshold or too few points. Skipping update.")
+            return None
+
+        N = len(P)
+        Rx = np.mean(Q[:,0])
+        Ry = np.mean(Q[:,1])
+        Px = np.mean(P[:,0])
+        Py = np.mean(P[:,1])
+        sum_RR = np.sum(Q[:,0]**2 + Q[:,1]**2)
+        sum_RP = np.sum(Q[:,0]*P[:,1] - Q[:,1]*P[:,0])
+        RR = sum_RR / N
+        RP = sum_RP / N
+
+        denominator = RR - (Rx**2 + Ry**2)
+        if abs(denominator) < 1e-9:
+            self.get_logger().warn("Denominator too small; skipping update.")
+            return None
+
+        dth_update = (RP - (Rx*Py - Ry*Px)) / denominator
+        dx_update = (Px - Rx) + Ry * dth_update
+        dy_update = (Py - Ry) - Rx * dth_update
+
+        dx_update = -dx_update
+        dy_update = -dy_update
+        dth_update = -dth_update
+
+        update_norm = math.sqrt(dx_update**2 + dy_update**2)
+        if update_norm > MAX_UPDATE_NORM:
+            scale = MAX_UPDATE_NORM / update_norm
+            dx_update *= scale
+            dy_update *= scale
+
+        return (dx_update, dy_update, dth_update)
+
+    def broadcastMapCorrection(self):
+        tf_corr = TransformStamped()
+        tf_corr.header.stamp = self.get_clock().now().to_msg()
+        tf_corr.header.frame_id = 'map'
+        tf_corr.child_frame_id  = 'drift'
+        tf_corr.transform.translation.x = self.dx_map
+        tf_corr.transform.translation.y = self.dy_map
+        tf_corr.transform.rotation.z = math.sin(self.dt_map/2.0)
+        tf_corr.transform.rotation.w = math.cos(self.dt_map/2.0)
+        self.tfBroadcaster.sendTransform(tf_corr)
+        self.get_logger().info(
+            f"Drift Correction (map→drift): dx_map={self.dx_map:.2f}, dy_map={self.dy_map:.2f}, dt_map={self.dt_map:.2f}"
+        )
+
+
+    def verify_correction(self):
+        # Compute a combined correction magnitude (you can adjust this as needed)
+        corr_norm = math.sqrt(self.dx_map**2 + self.dy_map**2 + self.dt_map**2)
+        if corr_norm > 0.001:
+            self.get_logger().info(f"CORRECTED BY {corr_norm:.2f} SUCCESS")
+        else:
+            self.get_logger().info("No significant correction applied.")
+
+    def scanCB(self, scan: LaserScan):
+        if abs(self.angular_velocity) >= TURN_THRESHOLD:
+            return
+
+        update = self.computeAlignmentLS(scan)
+        if update is None:
+            return
+        dx_u, dy_u, dth_u = update
+
+        dx_u  *= UPDATE_FACTOR
+        dy_u  *= UPDATE_FACTOR
+        dth_u *= UPDATE_FACTOR
+
+        new_dx = self.dx_map + cos(self.dt_map)*dx_u - sin(self.dt_map)*dy_u
+        new_dy = self.dy_map + sin(self.dt_map)*dx_u + cos(self.dt_map)*dy_u
+        new_dt = self.dt_map + dth_u
+
+        self.dx_map, self.dy_map, self.dt_map = new_dx, new_dy, new_dt
+
+        self.get_logger().info(
+            f"[LS Correction] dX={dx_u/UPDATE_FACTOR:.2f}, dY={dy_u/UPDATE_FACTOR:.2f}, dTh={dth_u/UPDATE_FACTOR:.2f}.  "
+            f"Accumulated: (dx_map={self.dx_map:.2f}, dy_map={self.dy_map:.2f}, dt_map={self.dt_map:.2f})"
+        )
+        self.broadcastMapCorrection()
+        # Verify the correction and print a message if significant.
+        self.verify_correction()
+
 def main(args=None):
-    # Initialize ROS.
     rclpy.init(args=args)
-
-    # Instantiate the node.
-    node = CustomNode('odometry')
-
-    # Spin, until interrupted.
+    node = CustomNode('localization_ls')
     rclpy.spin(node)
-
-    # Shutdown the node and ROS.
     node.shutdown()
     rclpy.shutdown()
 

@@ -2,230 +2,182 @@
 #
 #   buildmap.py
 #
-#   Build a map...
+#   Build an occupancy grid map from laser scans.
 #
-#   This explores the occupancy grid map.
+#   Note: The TF chain is now:
+#         map → drift → odom → base → laser/scan
+#   so the lookup of the transform from 'map' to the laser scan frame
+#   will compose the drift and odom corrections.
 #
-#   Node:       /buildmap
-#
-#   Subscribe:  /scan                   sensor_msgs/Lsaerscan
-#   Publish:    /map                    nav_msgs/OccupancyGrid
-#
-import time
+import math
 import numpy as np
 
-# ROS Imports
 import rclpy
+from rclpy.node import Node
+from rclpy.time import Time
+from rclpy.qos import QoSProfile, DurabilityPolicy
 
-from rclpy.node                 import Node
-from rclpy.time                 import Time
-from rclpy.qos                  import QoSProfile, DurabilityPolicy
+from tf2_ros import Buffer, TransformListener, TransformException
 
-from tf2_ros                    import TransformException
-from tf2_ros.buffer             import Buffer
-from tf2_ros.transform_listener import TransformListener
-from tf2_ros.transform_broadcaster import TransformBroadcaster
+from geometry_msgs.msg import Pose
+from nav_msgs.msg import OccupancyGrid, Odometry
+from sensor_msgs.msg import LaserScan
 
-from geometry_msgs.msg          import Point, Quaternion, Pose
-from geometry_msgs.msg          import Transform, TransformStamped
-from nav_msgs.msg               import OccupancyGrid
-from sensor_msgs.msg            import LaserScan
+# Map Dimensions and Resolution
+WIDTH       = 360     # number of cells in x
+HEIGHT      = 240     # number of cells in y
+RESOLUTION  = 0.05    # meters per cell
 
+# Map origin in world coordinates (map.info.origin)
+ORIGIN_X    = -9.00
+ORIGIN_Y    = -6.00
 
-#
-#   Global Definitions
-#
-WIDTH  = 360
-HEIGHT = 240
+# Log-odds increments for free/occupied cells
+LFREE       = 0.01
+LOCCUPIED   = 0.1
 
-RESOLUTION = 0.05
-ORIGIN_X   = -9.00              # Origin = location of lower-left corner
-ORIGIN_Y   = -6.00
-
-LFREE     = 0.2      # FIXME.  Set the log odds ratio of detecting freespace
-LOCCUPIED = 0.2       # FIXME.  Set the log odds ratio of detecting occupancy
-
-
-#
-#   Custom Node Class
-#
-class CustomNode(Node):
-    # Initialization.
-    def __init__(self, name):
-        # Initialize the node, naming it as specified
+class BuildMapNode(Node):
+    def __init__(self, name='buildmap'):
         super().__init__(name)
+        # Initialize the occupancy grid as log-odds values.
+        self.logoddsratio = np.ones((HEIGHT, WIDTH))
 
-        # Create the log-odds-ratio grid.
-        self.logoddsratio = np.zeros((HEIGHT, WIDTH))
+        # Publisher for the OccupancyGrid (latched for RViz)
+        qos = QoSProfile(depth=1)
+        qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.pub = self.create_publisher(OccupancyGrid, '/map', qos)
 
-        # Create a publisher to send the map data.  Note we use a
-        # quality of service with durability TRANSIENT_LOCAL, so new
-        # subscribers will get the last sent message.  RVIZ and others
-        # expect this for map messages.
-        quality = QoSProfile(durability=DurabilityPolicy.TRANSIENT_LOCAL,
-                             depth=1)
-        self.pub = self.create_publisher(OccupancyGrid, '/map', quality)
-
-        # Instantiate a TF listener.
-        self.tfBuffer   = Buffer()
+        # TF listener to transform the laser scan from its frame to the map frame.
+        self.tfBuffer = Buffer()
         self.tfListener = TransformListener(self.tfBuffer, self)
-        self.tfBroadcaster = TransformBroadcaster(self)
 
-        # Create a subscriber to the laser scan.
+        # Track angular and linear velocity from odometry (to skip scans if turning too fast)
+        self.angular_velocity = 0.0
+        self.linear_speed = 0.0
+
+        # Subscriptions
         self.create_subscription(LaserScan, '/scan', self.laserCB, 1)
+        self.create_subscription(Odometry, '/odom', self.odomCB, 1)
 
-        # Create a timer for sending the map data.
-        self.timer = self.create_timer(1, self.sendMap)
+        # Timer to publish the map at regular intervals (every 2 seconds)
+        self.timer = self.create_timer(2.0, self.sendMap)
 
-    # Shutdown
     def shutdown(self):
-        # Destroy the timer and node.
         self.destroy_timer(self.timer)
         self.destroy_node()
 
+    def odomCB(self, msg: Odometry):
+        # Update velocities from odometry (used to decide whether to process scans)
+        self.angular_velocity = msg.twist.twist.angular.z
+        vx = msg.twist.twist.linear.x
+        vy = msg.twist.twist.linear.y
+        self.linear_speed = math.sqrt(vx * vx + vy * vy)
 
-    ##################################################################
-    # Send the map.  Called from the timer at 1Hz.
     def sendMap(self):
-        # Convert the log odds ratio into a probability (0...1).
-        # Remember: self.logsoddsratio is a 3460x240 NumPy array,
-        # where the values range from -infinity to +infinity.  The
-        # probability should also be a 360x240 NumPy array, but with
-        # values ranging from 0 to 1, being the probability of a wall.
-        probability = np.exp(self.logoddsratio) / (1 + np.exp(self.logoddsratio))
+        # Convert log-odds values to probabilities in the range [0, 100]
+        probability = np.exp(self.logoddsratio) / (1.0 + np.exp(self.logoddsratio))
+        now = self.get_clock().now()
 
-        # Perpare the message and send.  Note this converts the
-        # probability into percent, sending integers from 0 to 100.
-        now  = self.get_clock().now()
-        data = (100 * probability).astype(int).flatten().tolist()
+        data = (100.0 * probability).astype(int).flatten().tolist()
 
-        self.map = OccupancyGrid()
-        self.map.header.frame_id        = 'map'
-        self.map.header.stamp           = now.to_msg()
-        self.map.info.map_load_time     = now.to_msg()
-        self.map.info.resolution        = RESOLUTION
-        self.map.info.width             = WIDTH
-        self.map.info.height            = HEIGHT
-        self.map.info.origin.position.x = ORIGIN_X
-        self.map.info.origin.position.y = ORIGIN_Y
-        self.map.data                   = data
+        grid_msg = OccupancyGrid()
+        grid_msg.header.frame_id = 'map'  # The map is the root frame.
+        grid_msg.header.stamp = now.to_msg()
+        grid_msg.info.map_load_time = now.to_msg()
+        grid_msg.info.resolution = RESOLUTION
+        grid_msg.info.width = WIDTH
+        grid_msg.info.height = HEIGHT
+        grid_msg.info.origin.position.x = ORIGIN_X
+        grid_msg.info.origin.position.y = ORIGIN_Y
+        grid_msg.data = data
 
-        self.pub.publish(self.map)
+        self.pub.publish(grid_msg)
 
+    def update_occupancy_cell(self, x_cell: int, y_cell: int, is_occupied: bool):
+        # Adjust the log-odds value for a cell.
+        if 0 <= x_cell < WIDTH and 0 <= y_cell < HEIGHT:
+            if is_occupied:
+                self.logoddsratio[y_cell, x_cell] += LOCCUPIED
+            else:
+                self.logoddsratio[y_cell, x_cell] -= LFREE
 
-    ##################################################################
-    # Utilities:
-    # Set the log odds ratio value
-    def set(self, u, v, value):
-        # Update only if legal.
-        if (u>=0) and (u<WIDTH) and (v>=0) and (v<HEIGHT):
-            self.logoddsratio[v,u] = value
-        else:
-            self.get_logger().warn("Out of bounds (%d, %d)" % (u,v))
-
-    # Adjust the log odds ratio value
-    def adjust(self, u, v, delta):
-        # Update only if legal.
-        if (u>=0) and (u<WIDTH) and (v>=0) and (v<HEIGHT):
-            self.logoddsratio[v,u] += delta
-        else:
-            self.get_logger().warn("Out of bounds (%d, %d)" % (u,v))
-
-    # Return a list of all intermediate (integer) pixel coordinates
-    # from (start) to (end) coordinates (which could be non-integer).
-    # In classic Python fashion, this excludes the end coordinates.
     def bresenham(self, start, end):
-        # Extract the coordinates
+        # Bresenham-like ray tracing from start → end in grid coordinates.
         (xs, ys) = start
         (xe, ye) = end
+        xs_int = int(xs)
+        ys_int = int(ys)
+        xe_int = int(xe)
+        ye_int = int(ye)
 
-        # Move along ray (excluding endpoint).
-        if (np.abs(xe-xs) >= np.abs(ye-ys)):
-            return[(u, int(ys + (ye-ys)/(xe-xs) * (u+0.5-xs)))
-                   for u in range(int(xs), int(xe), int(np.sign(xe-xs)))]
+        cells = []
+        if abs(xe_int - xs_int) >= abs(ye_int - ys_int):
+            step = 1 if xe_int >= xs_int else -1
+            slope = (ye - ys) / ((xe - xs) + 1e-9)
+            for u in range(xs_int, xe_int, step):
+                v = ys + slope * (u + 0.5 - xs)
+                cells.append((u, int(v)))
         else:
-            return[(int(xs + (xe-xs)/(ye-ys) * (v+0.5-ys)), v)
-                   for v in range(int(ys), int(ye), int(np.sign(ye-ys)))]
+            step = 1 if ye_int >= ys_int else -1
+            slope = (xe - xs) / ((ye - ys) + 1e-9)
+            for v in range(ys_int, ye_int, step):
+                u = xs + slope * (v + 0.5 - ys)
+                cells.append((int(u), v))
+        return cells
 
-
-    ##################################################################
-    # Laserscan CB.  Process the scans.
-    def laserCB(self, msg):
-        # Grab the transformation between map and laser's scan frames.
-        # Note the below asks for the lastest known transform.  If we
-        # use Time.from_msg(msg.header.stamp) in place of Time(), we
-        # could determine the transform at the exact time of the scan.
-        # But that delay a little if the latest TF data is behind.
-        try:
-            time.sleep(0.1)
-            tfmsg = self.tfBuffer.lookup_transform(
-                'map', msg.header.frame_id, rclpy.time.Time())
-        except TransformException as ex:
-            self.get_logger().warn("Unable to get transform: %s" % (ex,))
+    def laserCB(self, msg: LaserScan):
+        # Build the occupancy grid using the laser scan.
+        # Skip updates if the robot is rotating quickly.
+        if abs(self.angular_velocity) > 0.1:
             return
 
-        # Extract the laser scanner's position and orientation.
-        xc     = tfmsg.transform.translation.x
-        yc     = tfmsg.transform.translation.y
-        thetac = 2 * np.arctan2(tfmsg.transform.rotation.z,
-                                tfmsg.transform.rotation.w)
+        try:
+            # Lookup the transform from 'map' to the scan frame.
+            tfmsg = self.tfBuffer.lookup_transform('map', msg.header.frame_id, Time())
+        except TransformException as ex:
+            self.get_logger().warn(f"Unable to get transform: {ex}")
+            return
 
-        # Grab the rays: each ray's range and angle relative to the
-        # turtlebot's position and orientation.
-        rmin     = msg.range_min        # Sensor minimum range to be valid
-        rmax     = msg.range_max        # Sensor maximum range to be valid
-        ranges   = msg.ranges           # List of ranges for each angle
+        # Get the scanner’s pose in the map frame.
+        xc = tfmsg.transform.translation.x
+        yc = tfmsg.transform.translation.y
+        thetac = 2.0 * math.atan2(tfmsg.transform.rotation.z, tfmsg.transform.rotation.w)
 
-        thetamin = msg.angle_min        # Min angle (0.0)
-        thetamax = msg.angle_max        # Max angle (2pi)
-        thetainc = msg.angle_increment  # Delta between angles (2pi/360)
-        thetas   = np.arange(thetamin, thetamax, thetainc)
+        # Convert to grid coordinates.
+        u0 = (xc - ORIGIN_X) / RESOLUTION
+        v0 = (yc - ORIGIN_Y) / RESOLUTION
 
+        rmin = msg.range_min
+        rmax = msg.range_max
+        angles = np.arange(msg.angle_min, msg.angle_max, msg.angle_increment)
+        ranges = msg.ranges
 
-        #############################################################
-        u, v = (xc - ORIGIN_X) / RESOLUTION, (yc - ORIGIN_Y) / RESOLUTION
-        # self.set(int(u), int(v), 1)
+        for angle, rng in zip(angles, ranges):
+            direction = thetac + angle
+            if rmin < rng < rmax:
+                dist_in_cells = rng / RESOLUTION
+                u_f = u0 + dist_in_cells * math.cos(direction)
+                v_f = v0 + dist_in_cells * math.sin(direction)
+                # Mark free cells along the ray.
+                line_cells = self.bresenham((u0, v0), (u_f, v_f))
+                for (uu, vv) in line_cells:
+                    self.update_occupancy_cell(uu, vv, is_occupied=False)
+                # Mark the endpoint as occupied.
+                self.update_occupancy_cell(int(u_f), int(v_f), True)
+            elif rng >= rmax:
+                dist_in_cells = rmax / RESOLUTION
+                u_f = u0 + dist_in_cells * math.cos(direction)
+                v_f = v0 + dist_in_cells * math.sin(direction)
+                line_cells = self.bresenham((u0, v0), (u_f, v_f))
+                for (uu, vv) in line_cells:
+                    self.update_occupancy_cell(uu, vv, is_occupied=False)
 
-        # for theta, range in zip(thetas, ranges):
-        #     direction = theta + thetac
-        #     u_f, v_f = u + range*np.cos(direction)/RESOLUTION, v + range*np.sin(direction)/RESOLUTION
-        #     if rmin < range < rmax:
-        #         self.set(int(u_f), int(v_f), 1)
-
-        for theta, range in zip(thetas, ranges):
-            direction = theta + thetac
-            if rmin < range < rmax:
-                dist = range / RESOLUTION
-                u_f, v_f = u + dist*np.cos(direction), v + dist*np.sin(direction)
-                intermediates = self.bresenham((u, v), (u_f, v_f))
-                for u_interm, v_interm in intermediates:
-                    self.adjust(u_interm, v_interm, -LFREE)
-                self.adjust(int(u_f), int(v_f), LOCCUPIED)
-            if rmax < range:
-                dist = rmax / RESOLUTION
-                u_f, v_f = u + dist*np.cos(direction), v + dist*np.sin(direction)
-                intermediates = self.bresenham((u, v), (u_f, v_f))
-                for u_interm, v_interm in intermediates:
-                    self.adjust(u_interm, v_interm, -LFREE)
-        ############################################################
-
-
-#
-#   Main Code
-#
 def main(args=None):
-    # Initialize ROS.
     rclpy.init(args=args)
-
-    # Instantiate the node.
-    node = CustomNode('buildmap')
-
-    # Spin, until interrupted.
+    node = BuildMapNode()
     rclpy.spin(node)
-
-    # Shutdown the node and ROS.
     node.shutdown()
     rclpy.shutdown()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
