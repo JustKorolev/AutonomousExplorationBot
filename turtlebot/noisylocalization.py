@@ -17,7 +17,7 @@ from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker, MarkerArray
 
 from tf2_ros import TransformBroadcaster, TransformException, Buffer, TransformListener
-import logging
+# import logging
 
 # ----------------------------------------------------
 # User-configurable parameters
@@ -44,17 +44,17 @@ class CustomNode(Node):
     def __init__(self, name):
         super().__init__(name)
         # Adjust logfile path as needed.
-        logging.basicConfig(
-            filename='/home/baaqerfarhat/robotws/src/turtlebot/turtlebot/logfile.log',
-            level=logging.INFO,
-            format='%(asctime)s %(message)s'
-        )
-        self.logger = logging.getLogger(__name__)
+        # logging.basicConfig(
+        #     filename='/home/baaqerfarhat/robotws/src/turtlebot/turtlebot/logfile.log',
+        #     level=logging.INFO,
+        #     format='%(asctime)s %(message)s'
+        # )
+        # self.logger = logging.getLogger(__name__)
 
         # ---- Fixed drift→odom error simulation ----
-        self.fixed_x_error = 0.0      
-        self.fixed_theta_error = 0.0  
-        self.fixed_y_error = 0.0      
+        self.fixed_x_error = 0.0
+        self.fixed_theta_error = 0.0
+        self.fixed_y_error = 0.0
 
         self.x     = self.fixed_x_error
         self.y     = self.fixed_y_error
@@ -88,7 +88,7 @@ class CustomNode(Node):
 
     def updateMap(self, msg):
         self.map = msg
-        self.get_logger().info("Map updated.")
+        # self.get_logger().info("Map updated.")
 
     def odomCB(self, msg: Odometry):
         self.angular_velocity = msg.twist.twist.angular.z
@@ -96,9 +96,9 @@ class CustomNode(Node):
         self.y = self.fixed_y_error
         self.theta = self.fixed_theta_error
 
-        self.get_logger().info(
-            f"Fixed Drift→odom: x={self.x:.2f}, y={self.y:.2f}, theta={self.theta:.2f}"
-        )
+        # self.get_logger().info(
+        #     f"Fixed Drift→odom: x={self.x:.2f}, y={self.y:.2f}, theta={self.theta:.2f}"
+        # )
 
         tfmsg = TransformStamped()
         tfmsg.header.stamp = msg.header.stamp
@@ -157,12 +157,12 @@ class CustomNode(Node):
                 Time(),  # Use the current time to get the latest transform.
                 timeout=Duration(seconds=CAN_TRANSFORM_TIMEOUT))
         except TransformException as ex:
-            self.get_logger().warn(f"Unable to get drift->scan transform using latest time: {ex}")
+            # self.get_logger().warn(f"Unable to get drift->scan transform using latest time: {ex}")
             return None
 
         # Optionally, you can check the time difference if needed.
         # (If you do, make sure it doesn't block or cause extrapolation issues.)
-        
+
         # --- Add noise to the sensor reading ---
         sensor_x = tfmsg.transform.translation.x + np.random.normal(0, NOISE_STD_X)
         sensor_y = tfmsg.transform.translation.y + np.random.normal(0, NOISE_STD_Y)
@@ -214,11 +214,11 @@ class CustomNode(Node):
 
         diffs = np.linalg.norm(P - Q, axis=1)
         mean_diff = np.mean(diffs)
-        self.logger.info(f"Differences before correction: mean={mean_diff:.2f}")
+        # self.logger.info(f"Differences before correction: mean={mean_diff:.2f}")
         self.publish_line_marker(zip(P, Q))
 
         if len(P) < 20 or mean_diff > MAX_MEAN_ERROR:
-            self.get_logger().warn(f"Alignment error {mean_diff:.2f} exceeds threshold or too few points. Skipping update.")
+            # self.get_logger().warn(f"Alignment error {mean_diff:.2f} exceeds threshold or too few points. Skipping update.")
             return None
 
         N = len(P)
@@ -233,7 +233,7 @@ class CustomNode(Node):
 
         denominator = RR - (Rx**2 + Ry**2)
         if abs(denominator) < 1e-9:
-            self.get_logger().warn("Denominator too small; skipping update.")
+            # self.get_logger().warn("Denominator too small; skipping update.")
             return None
 
         dth_update = (RP - (Rx*Py - Ry*Px)) / denominator
@@ -262,18 +262,18 @@ class CustomNode(Node):
         tf_corr.transform.rotation.z = math.sin(self.dt_map/2.0)
         tf_corr.transform.rotation.w = math.cos(self.dt_map/2.0)
         self.tfBroadcaster.sendTransform(tf_corr)
-        self.get_logger().info(
-            f"Drift Correction (map→drift): dx_map={self.dx_map:.2f}, dy_map={self.dy_map:.2f}, dt_map={self.dt_map:.2f}"
-        )
+        # self.get_logger().info(
+        #     f"Drift Correction (map→drift): dx_map={self.dx_map:.2f}, dy_map={self.dy_map:.2f}, dt_map={self.dt_map:.2f}"
+        # )
 
 
     def verify_correction(self):
         # Compute a combined correction magnitude (you can adjust this as needed)
         corr_norm = math.sqrt(self.dx_map**2 + self.dy_map**2 + self.dt_map**2)
-        if corr_norm > 0.001:
-            self.get_logger().info(f"CORRECTED BY {corr_norm:.2f} SUCCESS")
-        else:
-            self.get_logger().info("No significant correction applied.")
+        # if corr_norm > 0.001:
+        #     self.get_logger().info(f"CORRECTED BY {corr_norm:.2f} SUCCESS")
+        # else:
+        #     self.get_logger().info("No significant correction applied.")
 
     def scanCB(self, scan: LaserScan):
         if abs(self.angular_velocity) >= TURN_THRESHOLD:
@@ -294,10 +294,10 @@ class CustomNode(Node):
 
         self.dx_map, self.dy_map, self.dt_map = new_dx, new_dy, new_dt
 
-        self.get_logger().info(
-            f"[LS Correction] dX={dx_u/UPDATE_FACTOR:.2f}, dY={dy_u/UPDATE_FACTOR:.2f}, dTh={dth_u/UPDATE_FACTOR:.2f}.  "
-            f"Accumulated: (dx_map={self.dx_map:.2f}, dy_map={self.dy_map:.2f}, dt_map={self.dt_map:.2f})"
-        )
+        # self.get_logger().info(
+        #     f"[LS Correction] dX={dx_u/UPDATE_FACTOR:.2f}, dY={dy_u/UPDATE_FACTOR:.2f}, dTh={dth_u/UPDATE_FACTOR:.2f}.  "
+        #     f"Accumulated: (dx_map={self.dx_map:.2f}, dy_map={self.dy_map:.2f}, dt_map={self.dt_map:.2f})"
+        # )
         self.broadcastMapCorrection()
         # Verify the correction and print a message if significant.
         self.verify_correction()
