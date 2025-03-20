@@ -74,11 +74,22 @@ class BuildMapNode(Node):
         self.linear_speed = math.sqrt(vx * vx + vy * vy)
 
     def sendMap(self):
-        # Convert log-odds values to probabilities in the range [0, 100]
-        probability = np.exp(self.logoddsratio) / (1.0 + np.exp(self.logoddsratio))
-        now = self.get_clock().now()
+        # Convert the log odds ratio into a probability (0...1).
+        # Remember: self.logsoddsratio is a 3460x240 NumPy array,
+        # where the values range from -infinity to +infinity.  The
+        # probability should also be a 360x240 NumPy array, but with
+        # values ranging from 0 to 1, being the probability of a wall.
 
-        data = (100.0 * probability).astype(int).flatten().tolist()
+
+        # Perpare the message and send.  Note this converts the
+        # probability into percent, sending integers from 0 to 100.
+        now  = self.get_clock().now()
+        try:
+            probability = np.exp(self.logoddsratio) / (1 + np.exp(self.logoddsratio))
+            data = (100 * probability).astype(np.int8).flatten().tolist()
+        except Exception:
+            print("Map error :(")
+            return
 
         grid_msg = OccupancyGrid()
         grid_msg.header.frame_id = 'map'  # The map is the root frame.

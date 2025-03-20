@@ -1,13 +1,12 @@
 import time
 import numpy as np
-import logging
 
 def wrapto180(angle):
     """Normalize an angle to the range [-π, π]."""
     return angle - 2 * np.pi * round(angle / (2 * np.pi))
 
 class RobotController:
-    def __init__(self, Kp_ang=2, Kd_ang=0.0001, Kp_lin=0.8, Kd_lin=0.07, goal_tolerance=0.1, alpha=0.2, log_file="robot_controller.log"):
+    def __init__(self, Kp_ang=1, Kd_ang=0.2, Kp_lin=1, Kd_lin=0.3, goal_tolerance=0.05, alpha=0.2):
         self.pos = np.zeros(2)
         self.orientation = 0
         self.path = None
@@ -16,21 +15,13 @@ class RobotController:
         self.Kp_lin = Kp_lin
         self.Kd_lin = Kd_lin
         self.goal_tolerance = goal_tolerance
-        self.prev_angle_error = 0.0
+        self.prev_angle = 0.0
         self.prev_distance = 0.0
         self.filtered_angle_error = 0.0  # For the EMA filter
         self.alpha = alpha  # Smoothing factor for the EMA filter
         self.current_index = 0
         self.prev_time = 0
         self.timeout = 15
-
-        # Set up logging
-        logging.basicConfig(
-            filename=log_file,
-            level=logging.INFO,
-            format="%(asctime)s - %(message)s"
-        )
-        self.logger = logging.getLogger()
 
     def update_path(self, path):
         self.path = path
@@ -40,11 +31,10 @@ class RobotController:
         self.pos = np.zeros(2)
         self.orientation = 0
         self.path = None
-        self.prev_angle_error = 0.0
+        self.prev_angle = 0.0
         self.prev_distance = 0.0
         self.filtered_angle_error = 0.0
         self.current_index = 0
-        self.logger.info("Controller has been reset.")
 
     def run(self, node, get_odom, send_velocity, is_colliding, spin):
         self.prev_time = time.time()
@@ -64,14 +54,11 @@ class RobotController:
                 self.alpha * self.filtered_angle_error + (1 - self.alpha) * angle_error
             )
 
-            # Log the distance and current index
-            self.logger.info(f"Target: {target}, Position: {position}")
 
             # Check if the waypoint is reached
             if distance < self.goal_tolerance:
-                self.logger.info(f"Reached waypoint {self.current_index}: {target} {distance}")
                 self.current_index += 1
-                self.prev_angle_error = 0.0
+                self.prev_angle = 0.0
                 self.filtered_angle_error = 0.0
                 self.prev_distance = 0.0  # Reset the previous distance
                 continue
@@ -79,6 +66,7 @@ class RobotController:
             # Prevent running into newly found obstacles
             normalized_direction = direction / distance
             if is_colliding(position, normalized_direction):
+                send_velocity(0.0, 0.0)
                 print("OBSTACLE IN PATH - ABORTING")
                 break
 
@@ -88,9 +76,9 @@ class RobotController:
             dt = now - self.prev_time
             angular_velocity = (
                 self.Kp_ang * angle_error
-                + self.Kd_ang * (angle_error - self.prev_angle_error) / dt
+                + self.Kd_ang * (theta_rad - self.prev_angle) / dt
             )
-            self.prev_angle_error = theta_rad
+            self.prev_angle = theta_rad
 
             # PD control for linear velocity
             distance_derivative = (distance - self.prev_distance) / dt

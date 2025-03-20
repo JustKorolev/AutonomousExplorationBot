@@ -63,7 +63,12 @@ class Node:
         if (self.x <= 0 or self.x >= MAP_HEIGHT or
             self.y <= 0 or self.y >= MAP_WIDTH):
             return False
-        return map_array[self.coordinates()] < OBSTACLE_THRESH
+        x, y = self.coordinates()
+        min_x = max(int(x - BOT_WIDTH_CLEARANCE / 2), 0)
+        max_x = min(int(x + BOT_WIDTH_CLEARANCE / 2), MAP_WIDTH - 1)
+        min_y = max(int(y - BOT_LENGTH_CLEARANCE / 2), 0)
+        max_y = min(int(y + BOT_LENGTH_CLEARANCE / 2), MAP_HEIGHT - 1)
+        return np.any(map_array[min_x:max_x+1, min_y:max_y+1] < OBSTACLE_THRESH)
 
     # Check the local planner - whether this connects to another node.
     def connectsTo(self, other, map_array):

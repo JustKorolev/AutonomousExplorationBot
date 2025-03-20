@@ -40,23 +40,24 @@ WNOM = 0.5         # This gives a turning radius of v/w = 0.5m
 
 # DIMENSTION IN MAP RESOLUTION
 RESOLUTION = 0.05
-BOT_WIDTH = 7 # BOT DIMENSIONS ARE BIGGER THAN ACTUAL FOR TOLERANCE
-BOT_LENGTH = 7
+BOT_WIDTH = 8 # BOT DIMENSIONS ARE BIGGER THAN ACTUAL FOR TOLERANCE
+BOT_LENGTH = 8
 MAP_WIDTH  = 360
 MAP_HEIGHT = 240
 ORIGIN_X   = -9.00              # Origin = location of lower-left corner
 ORIGIN_Y   = -6.00
 
 # TUNABLE CONSTANTS
-BOT_WIDTH_CLEARANCE = 4
-BOT_LENGTH_CLEARANCE = 4
+COLLISION_CLEARANCE = 9
 FRONITER_UPDATE_RADIUS = 10
-STEP_SCALE = 5
+COLLISION_STEP_SCALE = 9
+RRT_STEP_SCALE = 4
 OBSTACLE_THRESH = 80
 CLEAR_THRESH = 30
 CLEAR_NEIGHBOR_FRONTIER_THRESH = 5
-FRONTIER_DIST = 8
-HEUR_DISTANCE_WEIGHT = 10
+FRONTIER_WEIGHT_DECREMENT = 0.2
+FRONTIER_RADIUS = 8
+HEUR_DISTANCE_WEIGHT = 5
 
 def wrapto180(angle):
     return angle - 2*np.pi * round(angle/(2*np.pi))
@@ -161,13 +162,13 @@ class CustomNode(Node):
 
 
     def is_colliding(self, position, direction):
-        step = STEP_SCALE * np.flip(direction)
+        step = COLLISION_STEP_SCALE * np.flip(direction)
         pos_x, pos_y = position
         new_pos_y, new_pos_x = (np.array(self.scale_coordinates([[pos_y, pos_x]])) + step)[0]
-        min_x = max(int(new_pos_x - BOT_WIDTH_CLEARANCE), 0)
-        max_x = min(int(new_pos_x + BOT_WIDTH_CLEARANCE), MAP_WIDTH - 1)
-        min_y = max(int(new_pos_y - BOT_LENGTH_CLEARANCE), 0)
-        max_y = min(int(new_pos_y + BOT_LENGTH_CLEARANCE), MAP_HEIGHT - 1)
+        min_x = max(int(new_pos_x - COLLISION_CLEARANCE / 2), 0)
+        max_x = min(int(new_pos_x + COLLISION_CLEARANCE / 2), MAP_WIDTH - 1)
+        min_y = max(int(new_pos_y - COLLISION_CLEARANCE / 2), 0)
+        max_y = min(int(new_pos_y + COLLISION_CLEARANCE / 2), MAP_HEIGHT - 1)
 
         # self.publish_goal_marker([min_y, min_x])
         # self.publish_goal_marker([max_y, max_x])
@@ -187,7 +188,7 @@ class CustomNode(Node):
         min_y = max(int(idx_y - FRONITER_UPDATE_RADIUS), 0)
         max_y = min(int(idx_y + FRONITER_UPDATE_RADIUS), MAP_HEIGHT - 1)
 
-        self.frontier_weights[min_y:max_y+1, min_x:max_x+1] -= 0.3
+        self.frontier_weights[min_y:max_y+1, min_x:max_x+1] -= FRONTIER_WEIGHT_DECREMENT
         self.frontier_weights = np.maximum(self.frontier_weights, 0.01)
 
 
@@ -205,12 +206,12 @@ class CustomNode(Node):
 
         clear_neighbor_count = np.zeros_like(unexplored, dtype=int) # num of clear neighbors
         for idx in unexplored_indices:
-            neighbors = free_tree.query_ball_point(idx, FRONTIER_DIST)
+            neighbors = free_tree.query_ball_point(idx, FRONTIER_RADIUS)
             clear_neighbor_count[tuple(idx)] = len(neighbors)
 
         blocked_neighbor_count = np.zeros_like(unexplored, dtype=int) # num of blocked neighbors
         for idx in unexplored_indices:
-            neighbors = blocked_tree.query_ball_point(idx, FRONTIER_DIST)
+            neighbors = blocked_tree.query_ball_point(idx, FRONTIER_RADIUS)
             blocked_neighbor_count[tuple(idx)] = len(neighbors)
 
         frontier = ((clear_neighbor_count > CLEAR_NEIGHBOR_FRONTIER_THRESH) & (blocked_neighbor_count == 0)).astype(int)
@@ -233,7 +234,7 @@ class CustomNode(Node):
 
             # include number of neighboring frontier cells in cost
             tree = KDTree(frontier_idxs)
-            neighbor_count = len(tree.query_ball_point(idx, FRONTIER_DIST)) # num of frontier neighbors
+            neighbor_count = len(tree.query_ball_point(idx, FRONTIER_RADIUS)) # num of frontier neighbors
 
             heuristics[tuple(idx)] = (HEUR_DISTANCE_WEIGHT*dist - neighbor_count) / self.frontier_weights[tuple(idx)]
 
@@ -364,7 +365,7 @@ class CustomNode(Node):
             if np.array_equal(target_coords, near_coords):
                 continue
 
-            step = STEP_SCALE * (target_coords - near_coords) / np.linalg.norm((target_coords - near_coords))
+            step = RRT_STEP_SCALE * (target_coords - near_coords) / np.linalg.norm((target_coords - near_coords))
             nextnode_coords = (np.array(near_coords + step)).astype(int)
 
             if np.array_equal(near_coords, nextnode_coords):
@@ -380,7 +381,7 @@ class CustomNode(Node):
 
                     # If within DSTEP, also try connecting to the goal.  If
                     # the connection is made, break the loop to stop growing.
-                    if nextnode.distance(goalnode) <= STEP_SCALE:
+                    if nextnode.distance(goalnode) <= RRT_STEP_SCALE:
                         addtotree(nextnode, goalnode)
                         break
             else:
@@ -407,12 +408,31 @@ class CustomNode(Node):
 
     # Post process the path.
     def PostProcess(self, path):
+        if len(path) < 3:
+            return
+
+        new_path = [path[0]]
         i = 0
-        while (i < len(path)-2):
-            if path[i].connectsTo(path[i+2], self.map_array):
-                path.pop(i+1)
-            else:
-                i += 1
+        while i < len(path) - 1:
+            j = len(path) - 1
+            while j > i + 1:
+                if (path[j]).connectsTo(path[i], self.map_array):
+                    break
+                j -= 1
+
+            new_path.append(path[j])
+            i = j
+
+        return new_path
+
+    # def PostProcess(self, path):
+    #     i = 0
+    #     while (i < len(path)-2):
+    #         if path[i].connectsTo(path[i+2], self.map_array):
+    #             path.pop(i+1)
+    #         else:
+    #             i += 1
+    #     return path
 
 
     # Run the terminal input loop, send the commands, and ROS spin.
@@ -455,7 +475,7 @@ class CustomNode(Node):
                 # goal = [120, 140] # test
                 path = self.rrt(MapNode(scaled_pos_y, scaled_pos_x), MapNode(*goal))
                 if not path == None:
-                    self.PostProcess(path)
+                    path = self.PostProcess(path)
                     path_points = [node.coordinates() for node in path]
                     unscaled_path_points = self.unscale_coordinates(path_points)
                     unscaled_path_points[0] = (pos_y, pos_x)
