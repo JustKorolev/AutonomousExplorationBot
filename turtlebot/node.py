@@ -4,7 +4,7 @@ import numpy as np
 
 MAP_WIDTH  = 360
 MAP_HEIGHT = 240
-OBSTACLE_THRESH = 70
+OBSTACLE_THRESH = 80
 CLEAR_THRESH = 30
 BOT_WIDTH_CLEARANCE = 10
 BOT_LENGTH_CLEARANCE = 10
@@ -51,24 +51,23 @@ class Node:
     def coordinates(self):
         return (self.x, self.y)
 
-    # Compute the relative Chebyshev distance to another node.
+    # Compute the Euclidean distance to another node.
     def distance(self, other):
-        return max(abs(self.coordinates()[0] - other.coordinates()[0]),
-                   abs(self.coordinates()[1] - other.coordinates()[1]))
+        return np.linalg.norm(np.subtract(self.coordinates(), other.coordinates()))
 
     ################
     # Collision functions:
     # Check whether in free space.
     def inFreespace(self, map_array):
-        if (self.x <= 0 or self.x >= MAP_HEIGHT or
-            self.y <= 0 or self.y >= MAP_WIDTH):
+        if (self.x <= 0 or self.x >= MAP_WIDTH or
+            self.y <= 0 or self.y >= MAP_HEIGHT):
             return False
         x, y = self.coordinates()
         min_x = max(int(x - BOT_WIDTH_CLEARANCE / 2), 0)
         max_x = min(int(x + BOT_WIDTH_CLEARANCE / 2), MAP_WIDTH - 1)
         min_y = max(int(y - BOT_LENGTH_CLEARANCE / 2), 0)
         max_y = min(int(y + BOT_LENGTH_CLEARANCE / 2), MAP_HEIGHT - 1)
-        return np.any(map_array[min_x:max_x+1, min_y:max_y+1] < OBSTACLE_THRESH)
+        return np.any(map_array[min_y:max_y+1, min_x:max_x+1] < OBSTACLE_THRESH)
 
     # Check the local planner - whether this connects to another node.
     def connectsTo(self, other, map_array):
@@ -80,6 +79,6 @@ class Node:
             max_x = min(int(x_interm + BOT_WIDTH_CLEARANCE / 2), MAP_WIDTH - 1)
             min_y = max(int(y_interm - BOT_LENGTH_CLEARANCE / 2), 0)
             max_y = min(int(y_interm + BOT_LENGTH_CLEARANCE / 2), MAP_HEIGHT - 1)
-            if np.any(map_array[min_x:max_x+1, min_y:max_y+1] > OBSTACLE_THRESH):
+            if np.any(map_array[min_y:max_y+1, min_x:max_x+1] > OBSTACLE_THRESH):
                 return False
         return True

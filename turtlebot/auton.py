@@ -1,36 +1,23 @@
 #!/usr/bin/env python3
-#
-#   auton.py
-#
-#   Continually (at 10Hz!) send the a velocity command.
-#
-#   Node:       /auton
-#
-#   Subscribe:  map, odom
-#   Publish:    /cmd_vel        geometry_msgs/Twist
-#
+
 import curses
 import numpy as np
 import sys
 import random
-from scipy.spatial      import KDTree
+from scipy.spatial import KDTree
 from .node import Node as MapNode
 from .robot_controller import RobotController
 import time
 
 # ROS Imports
 import rclpy
-
-from rclpy.node                 import Node
-from rclpy.time                 import Time
-
-from rclpy.qos                  import QoSProfile, DurabilityPolicy
-from geometry_msgs.msg          import Twist
-from std_msgs.msg import ColorRGBA
-from nav_msgs.msg               import Odometry
-from nav_msgs.msg               import OccupancyGrid
-from visualization_msgs.msg     import Marker, MarkerArray
-from geometry_msgs.msg import Point
+from rclpy.node import Node
+from rclpy.time import Time
+from rclpy.qos import QoSProfile, DurabilityPolicy
+from geometry_msgs.msg import Twist, Point
+from nav_msgs.msg import Odometry, OccupancyGrid
+from visualization_msgs.msg import Marker
+from std_msgs.msg import ColorRGBA  # Fixed import for ColorRGBA
 
 #
 #   Global Definitions
@@ -38,164 +25,120 @@ from geometry_msgs.msg import Point
 VNOM = 0.3
 WNOM = 0.5         # This gives a turning radius of v/w = 0.5m
 
-# DIMENSTION IN MAP RESOLUTION
+# DIMENSIONS IN MAP RESOLUTION
 RESOLUTION = 0.05
-BOT_WIDTH = 8 # BOT DIMENSIONS ARE BIGGER THAN ACTUAL FOR TOLERANCE
+BOT_WIDTH = 8  # BOT DIMENSIONS ARE BIGGER THAN ACTUAL FOR TOLERANCE
 BOT_LENGTH = 8
-MAP_WIDTH  = 360
+MAP_WIDTH = 360
 MAP_HEIGHT = 240
-ORIGIN_X   = -9.00              # Origin = location of lower-left corner
-ORIGIN_Y   = -6.00
+ORIGIN_X = -9.00              # Origin = location of lower-left corner
+ORIGIN_Y = -6.00
 
-# TUNABLE CONSTANTS
+# ----------------------------------------------------
+# User-configurable parameters - SEE TECHNICAL REPORT
+# ----------------------------------------------------
 COLLISION_CLEARANCE = 9
-FRONITER_UPDATE_RADIUS = 10
+FRONITER_UPDATE_RADIUS = 30
 COLLISION_STEP_SCALE = 9
-RRT_STEP_SCALE = 4
+RRT_STEP_SCALE = 3
 OBSTACLE_THRESH = 80
 CLEAR_THRESH = 30
 CLEAR_NEIGHBOR_FRONTIER_THRESH = 5
 FRONTIER_WEIGHT_DECREMENT = 0.2
 FRONTIER_RADIUS = 8
 HEUR_DISTANCE_WEIGHT = 5
-RRT_GOAL_SELECT_FRACTION = 0.3
+RRT_GOAL_SELECT_FRACTION = 0.4
+
 
 def wrapto180(angle):
-    return angle - 2*np.pi * round(angle/(2*np.pi))
+    return angle - 2 * np.pi * round(angle / (2 * np.pi))
 
-#
-#   Custom Node Class
-#
+
 class CustomNode(Node):
-    # Initialization.
     def __init__(self, name, vnom, wnom):
-        # Initialize the node, naming it as specified
         super().__init__(name)
-
-        # Save the parameters.
         self.vnom = vnom
         self.wnom = wnom
 
-        # Create a publisher to send twist commands.
+        # Publishers
         self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
-
-        # Create a publisher to send marker arrays
-        self.marker_pub = self.create_publisher(Marker,
-                                        '/visualization_marker', 10)
+        self.marker_pub = self.create_publisher(Marker, '/visualization_marker', 10)
 
         # Subscribers
-        quality = QoSProfile(durability=DurabilityPolicy.TRANSIENT_LOCAL,
-                             depth=1)
-        self.create_subscription(Odometry, '/odom', self.updateOdom, 1)
-        self.create_subscription(OccupancyGrid, '/map', self.updateMap, 1)
+        self.create_subscription(Odometry, '/odom', self.update_odom, 1)
+        self.create_subscription(OccupancyGrid, '/map', self.update_map, 1)
 
-
-        # Initialize the (repeating) message data.
+        # Initialize variables
         self.vel_msg = Twist()
-        self.vel_msg.linear.x = 0.0
-        self.vel_msg.linear.y = 0.0
-        self.vel_msg.linear.z = 0.0
-        self.vel_msg.angular.x = 0.0
-        self.vel_msg.angular.y = 0.0
-        self.vel_msg.angular.z = 0.0
-
-        # Initialize map and odometry
         self.map = OccupancyGrid()
         self.map_array = np.array([[], []])
-        self.frontier_weights = np.ones(shape=(MAP_HEIGHT, MAP_WIDTH), dtype=float)
+        self.frontier_weights = np.ones((MAP_HEIGHT, MAP_WIDTH), dtype=float)
         self.odom = Odometry()
-
-        # Create a fixed rate to control the speed of sending commands.
-        rate    = 10.0
-        self.dt = 1/rate
-        self.rate = self.create_rate(rate)
+        self.dt = 1 / 10.0
         self.node_start_time = self.get_clock().now().nanoseconds
 
-        # Report.
-        self.get_logger().info("Auton sending every %f sec..." % self.dt)
-        self.get_logger().info("Nominal fwd = %6.3fm/s, spin = %6.3frad/sec"
-                               % (self.vnom, self.wnom))
-
-    def updateMap(self, msg):
+    def update_map(self, msg):
         self.map = msg
         try:
-            self.map_array = np.array(msg.data, dtype=np.int8).reshape(
-                                                        (MAP_HEIGHT, MAP_WIDTH))
+            self.map_array = np.array(msg.data, dtype=np.int8).reshape((MAP_HEIGHT, MAP_WIDTH))
         except ValueError:
             self.map_array = np.array([[], []])
 
-    def updateOdom(self, msg):
+    def update_odom(self, msg):
         self.odom = msg
 
     def get_pose(self):
         pose = self.odom.pose.pose
-        orientation = 2 * np.atan2(pose.orientation.z,
-                                   pose.orientation.w)
-        return np.array([pose.position.x, pose.position.y]),\
-               orientation
+        orientation = 2 * np.atan2(pose.orientation.z, pose.orientation.w)
+        return np.array([pose.position.x, pose.position.y]), orientation
 
     def publish_velocity(self, lin_vel, ang_vel):
-        self.vel_msg.linear.x  = lin_vel
+        self.vel_msg.linear.x = lin_vel
         self.vel_msg.angular.z = ang_vel
         self.pub.publish(self.vel_msg)
-
-        # Reset velocities?
-        self.vel_msg.linear.x  = 0.0
+        self.vel_msg.linear.x = 0.0
         self.vel_msg.angular.z = 0.0
-
-    def unscale_coordinates(self, coords):
-        origin_x = self.map.info.origin.position.x
-        origin_y = self.map.info.origin.position.y
-        coords = np.array(coords, np.float64)
-        unscaled_coords = coords * RESOLUTION
-        unscaled_coords[:,1] += origin_x
-        unscaled_coords[:,0] += origin_y
-        return list(unscaled_coords)
 
     def scale_coordinates(self, coords):
         origin_x = self.map.info.origin.position.x
         origin_y = self.map.info.origin.position.y
         coords = np.array(coords, np.float64)
-        coords[:,1] -= origin_x
-        coords[:,0] -= origin_y
-        scaled_coords = coords / RESOLUTION
-        return list(scaled_coords.astype(int))
+        coords[:, 0] -= origin_x
+        coords[:, 1] -= origin_y
+        return (coords / RESOLUTION).astype(int)
 
+    def unscale_coordinates(self, coords):
+        origin_x = self.map.info.origin.position.x
+        origin_y = self.map.info.origin.position.y
+        coords = np.array(coords, np.float64)
+        coords *= RESOLUTION
+        coords[:, 0] += origin_x
+        coords[:, 1] += origin_y
+        return coords.tolist()
 
     def is_colliding(self, position, direction):
-        step = COLLISION_STEP_SCALE * np.flip(direction)
-        pos_x, pos_y = position
-        new_pos_y, new_pos_x = (np.array(self.scale_coordinates([[pos_y, pos_x]])) + step)[0]
+        step = COLLISION_STEP_SCALE * direction
+        new_pos_x, new_pos_y = (self.scale_coordinates([position]) + step)[0]
         min_x = max(int(new_pos_x - COLLISION_CLEARANCE / 2), 0)
         max_x = min(int(new_pos_x + COLLISION_CLEARANCE / 2), MAP_WIDTH - 1)
         min_y = max(int(new_pos_y - COLLISION_CLEARANCE / 2), 0)
         max_y = min(int(new_pos_y + COLLISION_CLEARANCE / 2), MAP_HEIGHT - 1)
 
-        # self.publish_goal_marker([min_y, min_x])
-        # self.publish_goal_marker([max_y, max_x])
-
-        if np.any(self.map_array[min_y:max_y+1, min_x:max_x+1] > OBSTACLE_THRESH):
+        if np.any(self.map_array[min_y:max_y + 1, min_x:max_x + 1] > OBSTACLE_THRESH):
             self.update_frontier_weights([new_pos_y, new_pos_x])
-            print("COLLISION DETECTED AHEAD")
-            return True  # Collision detected
-        return False  # No collision
-
+            return True
+        return False
 
     def update_frontier_weights(self, frontier_idx):
-        idx_x = frontier_idx[1]
-        idx_y = frontier_idx[0]
+        idx_x, idx_y = frontier_idx[1], frontier_idx[0]
         min_x = max(int(idx_x - FRONITER_UPDATE_RADIUS), 0)
         max_x = min(int(idx_x + FRONITER_UPDATE_RADIUS), MAP_WIDTH - 1)
         min_y = max(int(idx_y - FRONITER_UPDATE_RADIUS), 0)
         max_y = min(int(idx_y + FRONITER_UPDATE_RADIUS), MAP_HEIGHT - 1)
-
-        self.frontier_weights[min_y:max_y+1, min_x:max_x+1] -= FRONTIER_WEIGHT_DECREMENT
+        self.frontier_weights[min_y:max_y + 1, min_x:max_x + 1] -= FRONTIER_WEIGHT_DECREMENT
         self.frontier_weights = np.maximum(self.frontier_weights, 0.01)
 
-
-
     def get_frontier_idxs(self):
-        # FIND FRONTIER CELLS
         unexplored = ((self.map_array > CLEAR_THRESH) & (self.map_array < OBSTACLE_THRESH)).astype(int)
         unexplored_indices = np.argwhere(unexplored == 1)
         free = (self.map_array < CLEAR_THRESH).astype(int)
@@ -205,49 +148,34 @@ class CustomNode(Node):
         free_tree = KDTree(free_indices)
         blocked_tree = KDTree(blocked_indices)
 
-        clear_neighbor_count = np.zeros_like(unexplored, dtype=int) # num of clear neighbors
+        clear_neighbor_count = np.zeros_like(unexplored, dtype=int)
         for idx in unexplored_indices:
             neighbors = free_tree.query_ball_point(idx, FRONTIER_RADIUS)
             clear_neighbor_count[tuple(idx)] = len(neighbors)
 
-        blocked_neighbor_count = np.zeros_like(unexplored, dtype=int) # num of blocked neighbors
+        blocked_neighbor_count = np.zeros_like(unexplored, dtype=int)
         for idx in unexplored_indices:
             neighbors = blocked_tree.query_ball_point(idx, FRONTIER_RADIUS)
             blocked_neighbor_count[tuple(idx)] = len(neighbors)
 
         frontier = ((clear_neighbor_count > CLEAR_NEIGHBOR_FRONTIER_THRESH) & (blocked_neighbor_count == 0)).astype(int)
-        frontier_indices = np.argwhere(frontier == 1)
-
-        return frontier_indices
+        return np.flip(np.argwhere(frontier == 1))
 
     def get_goal(self, robot_pos):
         frontier_idxs = self.get_frontier_idxs()
-        self.publish_frontier_markers(frontier_idxs)
-        robot_pos_x = robot_pos.x
-        robot_pos_y = robot_pos.y
-        scaled_robot_pos = self.scale_coordinates([[robot_pos_y, robot_pos_x]])[0]
+        robot_pos_x, robot_pos_y = robot_pos.x, robot_pos.y
+        scaled_robot_pos = self.scale_coordinates([[robot_pos_x, robot_pos_y]])[0]
 
-
-        heuristics = {} # heuristic for each frontier cell
+        heuristics = {}
         for idx in frontier_idxs:
-            # make sure this distance is correct
-            dist = np.sqrt((scaled_robot_pos[1] - idx[1])**2 + (scaled_robot_pos[0] - idx[0])**2)
-
-            # include number of neighboring frontier cells in cost
+            dist = np.linalg.norm(scaled_robot_pos - idx)
             tree = KDTree(frontier_idxs)
-            neighbor_count = len(tree.query_ball_point(idx, FRONTIER_RADIUS)) # num of frontier neighbors
+            neighbor_count = len(tree.query_ball_point(idx, FRONTIER_RADIUS))
+            heuristics[tuple(idx)] = (HEUR_DISTANCE_WEIGHT * dist - neighbor_count) / self.frontier_weights[(idx[1], idx[0])]
 
-            heuristics[tuple(idx)] = (HEUR_DISTANCE_WEIGHT*dist - neighbor_count) / self.frontier_weights[tuple(idx)]
-
-        # pick goal with minimum cost
-        if len(heuristics) != 0:
-            goal_idx = min(heuristics, key=heuristics.get)
-        else:
-            goal_idx = None
-        return goal_idx
+        return min(heuristics, key=heuristics.get) if heuristics else None
 
     def publish_frontier_markers(self, points):
-        # Markers for frontier points
         unscaled_points = self.unscale_coordinates(points)
         marker = Marker()
         marker.header.frame_id = "map"
@@ -256,71 +184,66 @@ class CustomNode(Node):
         marker.header.stamp = self.get_clock().now().to_msg()
         marker.id = 0
         marker.ns = "frontier_markers"
-
         marker.scale.x = 0.1
         marker.scale.y = 0.1
 
-        for (i, p_unscaled), p  in zip(enumerate(unscaled_points), points):
-            point = Point()
-            point.x, point.y = float(p_unscaled[1]), float(p_unscaled[0])
+        for p_unscaled, p in zip(unscaled_points, points):
+            point = Point(x=float(p_unscaled[0]), y=float(p_unscaled[1]))
             marker.points.append(point)
 
-            color = ColorRGBA()
-            color.r = 1 - self.frontier_weights[p[0], p[1]] * 0.9
-            color.g = self.frontier_weights[p[0], p[1]]
-            color.b = 0.0
-            color.a = 1.0  # Full opacity
+            color = ColorRGBA(
+                r=1 - self.frontier_weights[p[1], p[0]] * 0.9,
+                g=self.frontier_weights[p[1], p[0]],
+                b=0.0,
+                a=1.0
+            )
             marker.colors.append(color)
 
         self.marker_pub.publish(marker)
 
     def publish_goal_marker(self, point):
-        # marker for goal
         unscaled_point = self.unscale_coordinates([point])[0]
-        marker1 = Marker()
-        marker1.header.frame_id = "map"
-        marker1.type = Marker.POINTS
-        marker1.action = Marker.ADD
-        marker1.header.stamp = self.get_clock().now().to_msg()
-        # marker1.lifetime = rclpy.duration.Duration(seconds=4).to_msg()
-        marker1.id = 1
-        marker1.ns = "goal_marker"
+        marker = Marker()
+        marker.header.frame_id = "map"
+        marker.type = Marker.POINTS
+        marker.action = Marker.ADD
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.id = 1
+        marker.ns = "goal_marker"
 
-        marker1.scale.x = 0.3
-        marker1.scale.y = 0.3
-        marker1.color.r = 0.0
-        marker1.color.g = 0.2
-        marker1.color.b = 1.0
-        marker1.color.a = 1.0
+        marker.scale.x = 0.15
+        marker.scale.y = 0.15
+        marker.color.r = 0.0
+        marker.color.g = 0.2
+        marker.color.b = 1.0
+        marker.color.a = 1.0
 
         goal_point = Point()
-        goal_point.x, goal_point.y = float(unscaled_point[1]), float(unscaled_point[0])
-        marker1.points.append(goal_point)
+        goal_point.x, goal_point.y = float(unscaled_point[0]), float(unscaled_point[1])
+        marker.points.append(goal_point)
 
-        self.marker_pub.publish(marker1)
-
+        self.marker_pub.publish(marker)
 
     def publish_path_marker(self, points):
-        unscaled_points = self.unscale_coordinates((points))
+        unscaled_points = self.unscale_coordinates(points)
         marker = Marker()
-        marker.header.frame_id = "map"  # Change "map" to "odom" if "map" doesn't exist
+        marker.header.frame_id = "map"
         marker.type = Marker.LINE_STRIP
         marker.action = Marker.ADD
         marker.header.stamp = self.get_clock().now().to_msg()
-        # marker.lifetime = rclpy.duration.Duration(seconds=2).to_msg()
-        marker.id = 1
+        marker.id = 2
         marker.ns = "path"
+
         for pair in unscaled_points:
             p1 = Point()
-            p1.x, p1.y = float(pair[1]), float(pair[0])
-
+            p1.x, p1.y = float(pair[0]), float(pair[1])
             marker.points.append(p1)
 
-            marker.scale.x = 0.05 # Line width
-            marker.color.r = 0.0
-            marker.color.g = 0.7
-            marker.color.b = 0.5
-            marker.color.a = 1.0
+        marker.scale.x = 0.05  # Line width
+        marker.color.r = 0.0
+        marker.color.g = 0.7
+        marker.color.b = 0.5
+        marker.color.a = 1.0
 
         self.marker_pub.publish(marker)
 
@@ -352,28 +275,29 @@ class CustomNode(Node):
             if random.random() <= RRT_GOAL_SELECT_FRACTION:
                 target_coords = np.array(goalnode.coordinates())
             else:
-                target_coords = np.array([random.randint(0, MAP_HEIGHT-1),
-                                        random.randint(0, MAP_WIDTH-1)])
+                target_coords = np.array([random.randint(0, MAP_WIDTH-1),
+                                        random.randint(0, MAP_HEIGHT-1)])
             targetnode = MapNode(*target_coords)
 
             # Directly determine the distances to the target node.
             distances = np.array([node.distance(targetnode) for node in tree])
             index     = np.argmin(distances)
             nearnode  = tree[index]
+            d         = distances[index]
 
             # Determine the next node.
             near_coords = np.array(nearnode.coordinates())
             if np.array_equal(target_coords, near_coords):
                 continue
-
-            step = RRT_STEP_SCALE * (target_coords - near_coords) / np.linalg.norm((target_coords - near_coords))
-            nextnode_coords = (np.array(near_coords + step)).astype(int)
+            step_size = RRT_STEP_SCALE / d
+            nextnode_coords = (near_coords + (target_coords - near_coords) * step_size).astype(int)
 
             if np.array_equal(near_coords, nextnode_coords):
                 print("COORDINATAES ARE THE SAME - THIS SHOULD NEVER HAPPEN")
 
 
             nextnode = MapNode(*nextnode_coords)
+
 
             # Check whether to attach.
             if self.map_array.shape == (MAP_HEIGHT, MAP_WIDTH):
@@ -385,6 +309,7 @@ class CustomNode(Node):
                     if nextnode.distance(goalnode) <= RRT_STEP_SCALE:
                         addtotree(nextnode, goalnode)
                         break
+
             else:
                 continue
 
@@ -400,10 +325,6 @@ class CustomNode(Node):
         path = [goalnode]
         while path[0].parent is not None:
             path.insert(0, path[0].parent)
-
-        # Report and return.
-        # print("Finished after %d steps and the tree having %d nodes" %
-        #     (steps, len(tree)))
         return path
 
 
@@ -426,26 +347,10 @@ class CustomNode(Node):
 
         return new_path
 
-    # def PostProcess(self, path):
-    #     i = 0
-    #     while (i < len(path)-2):
-    #         if path[i].connectsTo(path[i+2], self.map_array):
-    #             path.pop(i+1)
-    #         else:
-    #             i += 1
-    #     return path
-
-
-    # Run the terminal input loop, send the commands, and ROS spin.
     def loop(self, screen):
-        # Initialize the controller
         controller = RobotController()
 
-
-        # Run the loop until shutdown.
         while rclpy.ok():
-
-            # wait to receive correct data
             rclpy.spin_once(self)
             now = self.get_clock().now().nanoseconds
             if now - self.node_start_time < 5e9:
@@ -460,85 +365,49 @@ class CustomNode(Node):
                 print("Exploration Finished! Killing program.")
                 break
 
+            # Visualize frontiers
+            frontier_idxs = self.get_frontier_idxs()
+            self.publish_frontier_markers(frontier_idxs)
+
             screen.addstr(9, 0, f"Goal: {goal}")
             self.publish_goal_marker(goal)
 
-
             # Calculate path using RRT
             pos_x, pos_y = pos.x, pos.y
-            orientation = 2 * np.atan2(pose.orientation.z,
-                                       pose.orientation.w)
-            scaled_pos_y, scaled_pos_x = self.scale_coordinates([(pos_y, pos_x)])[0]
+            orientation = 2 * np.atan2(pose.orientation.z, pose.orientation.w)
+            scaled_pos_x, scaled_pos_y = self.scale_coordinates([(pos_x, pos_y)])[0]
             screen.addstr(10, 0, f"position: {scaled_pos_x, scaled_pos_y}")
             screen.addstr(11, 0, f"orientation: {orientation}")
 
-            if scaled_pos_x != goal[0] and scaled_pos_y != goal[1]:
-                path = self.rrt(MapNode(scaled_pos_y, scaled_pos_x), MapNode(*goal))
-                if not path == None:
-                    path = self.PostProcess(path)
-                    path_points = [node.coordinates() for node in path]
-                    unscaled_path_points = self.unscale_coordinates(path_points)
-                    unscaled_path_points[0] = (pos_y, pos_x)
-                    self.publish_path_marker(path_points)
-                    controller.update_path(unscaled_path_points)
+            path = self.rrt(MapNode(scaled_pos_x, scaled_pos_y), MapNode(*goal))
+            if path:
+                path = self.PostProcess(path)
+                path_points = [node.coordinates() for node in path]
+                unscaled_path_points = self.unscale_coordinates(path_points)
+                unscaled_path_points[0] = (pos_x, pos_y)
+                self.publish_path_marker(path_points)
+                controller.update_path(unscaled_path_points)
 
+                controller.run(self, self.get_pose, self.publish_velocity,
+                                self.is_colliding, rclpy.spin_once)
+                controller.reset()
 
-                    controller.run(self, self.get_pose, self.publish_velocity,
-                                   self.is_colliding, rclpy.spin_once)
-                    controller.reset()
-
-
-                else:
-                    print("NO PATH FOUND")
-            # except Exception as e:
-            #     print("failed")
-            #     print(e)
-
-
-
-
-            screen.clrtoeol()
             screen.refresh()
 
-            # Spin once to process other items.
+    def shutdown(self):
+        self.destroy_node()
 
 
-
-
-
-#
-#   Main Code
-#
 def main(args=None):
-    # Pull out the nominal forward/spin speeds from the non-ROS parameters.
-    if (len(sys.argv) > 3):
-        print("Usage: auton.py forward_speed spin_speed")
-        print("GOOD DEFAULTS: auton.py %3.1f %3.1f" % (VNOM, WNOM))
-        return
-    elif (len(sys.argv) < 3):
-        print("Usage: auton.py forward_speed spin_speed")
-        print("Using default values...")
-        vnom = VNOM
-        wnom = WNOM
-    else:
-        vnom = float(sys.argv[1])
-        wnom = float(sys.argv[2])
-
-    # Initialize ROS.
     rclpy.init(args=args)
-
-    # Instantiate the node.
-    node = CustomNode('auton', vnom, wnom)
-
-    # Run the terminal input loop, which spins the ROS items.
+    node = CustomNode('auton', VNOM, WNOM)
     try:
         curses.wrapper(node.loop)
     except KeyboardInterrupt:
         pass
-
-    # Shutdown the node and ROS.
     node.shutdown()
     rclpy.shutdown()
+
 
 if __name__ == "__main__":
     main()

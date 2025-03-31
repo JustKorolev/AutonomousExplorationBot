@@ -6,7 +6,7 @@ def wrapto180(angle):
     return angle - 2 * np.pi * round(angle / (2 * np.pi))
 
 class RobotController:
-    def __init__(self, Kp_ang=1, Kd_ang=0.3, Kp_lin=1, Kd_lin=0.3, goal_tolerance=0.05, alpha=0.2):
+    def __init__(self, Kp_ang=0.5, Kd_ang=-0.2, Kp_lin=1, Kd_lin=0.3, goal_tolerance=0.05, alpha=0.2):
         self.pos = np.zeros(2)
         self.orientation = 0
         self.path = None
@@ -36,11 +36,12 @@ class RobotController:
         self.filtered_angle_error = 0.0
         self.current_index = 0
 
+
     def run(self, node, get_odom, send_velocity, is_colliding, spin):
         self.prev_time = time.time()
         while self.current_index < len(self.path):
             spin(node)  # Spin the node that is running this
-            target = np.flip(np.array(self.path[self.current_index]))
+            target = np.array(self.path[self.current_index])
             position, theta_rad = get_odom()
 
             # Calculate direction and distance to the target
@@ -66,7 +67,6 @@ class RobotController:
             # Prevent running into newly found obstacles
             normalized_direction = direction / distance
             if is_colliding(position, normalized_direction):
-                send_velocity(0.0, 0.0)
                 print("OBSTACLE IN PATH - ABORTING")
                 break
 
@@ -92,3 +92,5 @@ class RobotController:
             # Send the velocity command
             send_velocity(linear_velocity, angular_velocity)
             self.prev_time = now
+
+        send_velocity(0.0, 0.0) # Stop after path execution

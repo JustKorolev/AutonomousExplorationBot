@@ -33,7 +33,7 @@ ORIGIN_X    = -9.00
 ORIGIN_Y    = -6.00
 
 # Log-odds increments for free/occupied cells
-LFREE       = 0.01
+LFREE       = 0.03
 LOCCUPIED   = 0.1
 
 class BuildMapNode(Node):
